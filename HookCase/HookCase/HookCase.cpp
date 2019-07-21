@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2018 Steven Michaud
+// Copyright (c) 2019 Steven Michaud
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -26,7 +26,8 @@
 // It also removes all the restrictions that Apple has placed upon it.  So
 // HookCase.kext can be used with an app that has entitlements, is setuid or
 // setgid, or has a __restrict section in a __RESTRICT segment.  But to load
-// HookCase.kext you need to turn off Apple's System Integrity Protection
+// HookCase.kext you need to turn off Apple's System Integrity Protection at
+// least partially
 // (https://developer.apple.com/library/content/documentation/Security/Conceptual/System_Integrity_Protection_Guide/KernelExtensions/KernelExtensions.html).
 // So it's not easy to use for nefarious purposes.
 //
@@ -72,7 +73,7 @@
 // "INTERRUPT(0xNN)".  But note that the ranges 0xD0-0xFF and 0x50-0x5F are
 // reserved for APIC interrupts (see the xnu kernel's osfmk/i386/lapic.h).
 // So we're reasonably safe reserving the range 0x30-0x37 for our own use,
-// though we currently only use 0x30-0x33.  And aside from plenty of them
+// though we currently only use 0x30-0x34.  And aside from plenty of them
 // being available, there are other advantages to using interrupts as
 // breakpoints:  They're short (they take up just two bytes of machine code),
 // but provide more information than other instructions of equal length (like
@@ -239,6 +240,43 @@ bool macOS_HighSierra_less_than_4()
   return ((OSX_Version() & 0xFF) < 0x50);
 }
 
+// Build 17G7020 is a post-10.13.6 security fix.
+bool macOS_HighSierra_less_than_17G7020()
+{
+  if (!((OSX_Version() & 0xFF00) == MAC_OS_X_VERSION_10_13_HEX)) {
+    return false;
+  }
+
+  // The output of "uname -r" for macOS 10.13.6 is actually "17.7.0"
+  if ((OSX_Version() & 0xFF) < 0x70) {
+    return false;
+  }
+
+  static long build_num = -1;
+  if (build_num == -1) {
+    size_t build_id_string_length;
+    sysctlbyname("kern.osversion", NULL, &build_id_string_length, NULL, 0);
+    char *build_id_string = (char *) IOMalloc(build_id_string_length);
+    if (!build_id_string) {
+      return false;
+    }
+    // Build ids for macOS 10.13.6 all start with "17G".  Remove that and
+    // use the rest as a build number.
+    if (sysctlbyname("kern.osversion", build_id_string,
+                     &build_id_string_length, NULL, 0) == 0)
+    {
+      const char *build_num_string = build_id_string + 3;
+      build_num = strtol(build_num_string, NULL, 10);
+    }
+    IOFree(build_id_string, build_id_string_length);
+    if (build_num == -1) {
+      return false;
+    }
+  }
+
+  return (build_num < 7020);
+}
+
 bool macOS_Mojave()
 {
   return ((OSX_Version() & 0xFF00) == MAC_OS_X_VERSION_10_14_HEX);
@@ -328,11 +366,16 @@ kernel_type get_kernel_type()
   // and without HookCase.  In fact all that's needed to trigger a panic is to
   // start Safari, visit apple.com, then quit it.  These panics all have the
   // error "Assertion failed: object->vo_purgeable_volatilizer == NULL".
+  //
+  // The macOS 10.14 DEBUG kernel is still a bit flaky (as of 10.14.5), but
+  // it's not nearly so bad as before.
+#if (0)
   if (macOS_Mojave()) {
     if (type == kernel_type_debug) {
       type = kernel_type_unknown;
     }
   }
+#endif
 
   return type;
 }
@@ -3484,6 +3527,21 @@ typedef struct thread_fake_highsierra
   int iotier_override;  // Offset 0x4b0
 } thread_fake_highsierra_t;
 
+// As of build 17G7020 the size of the 'machine' struct increased by one byte.
+// So the offset of 'iotier_override' was pushed down by one byte.
+typedef struct thread_fake_highsierra_17G7020
+{
+  uint32_t pad1[14];
+  integer_t options;    // Offset 0x38
+  uint32_t pad2[193];
+  vm_map_t map;         // Offset 0x340
+  uint32_t pad3[58];
+  // Actually a member of thread_t's 'machine' member.
+  void *ifps;           // Offset 0x430
+  uint32_t pad4[32];
+  int iotier_override;  // Offset 0x4b8
+} thread_fake_highsierra_17G7020_t;
+
 typedef struct thread_fake_highsierra_development
 {
   uint32_t pad1[16];
@@ -3497,6 +3555,21 @@ typedef struct thread_fake_highsierra_development
   int iotier_override;  // Offset 0x4c8
 } thread_fake_highsierra_development_t;
 
+// As of build 17G7020 the size of the 'machine' struct increased by one byte.
+// So the offset of 'iotier_override' was pushed down by one byte.
+typedef struct thread_fake_highsierra_development_17G7020
+{
+  uint32_t pad1[16];
+  integer_t options;    // Offset 0x40
+  uint32_t pad2[193];
+  vm_map_t map;         // Offset 0x348
+  uint32_t pad3[62];
+  // Actually a member of thread_t's 'machine' member.
+  void *ifps;           // Offset 0x448
+  uint32_t pad4[32];
+  int iotier_override;  // Offset 0x4d0
+} thread_fake_highsierra_development_17G7020_t;
+
 typedef struct thread_fake_highsierra_debug
 {
   uint32_t pad1[48];
@@ -3509,6 +3582,21 @@ typedef struct thread_fake_highsierra_debug
   uint32_t pad4[46];
   int iotier_override;  // Offset 0x610
 } thread_fake_highsierra_debug_t;
+
+// As of build 17G7020 the size of the 'machine' struct increased by one byte.
+// So the offset of 'iotier_override' was pushed down by one byte.
+typedef struct thread_fake_highsierra_debug_17G7020
+{
+  uint32_t pad1[48];
+  integer_t options;    // Offset 0xc0
+  uint32_t pad2[227];
+  vm_map_t map;         // Offset 0x450
+  uint32_t pad3[62];
+  // Actually a member of thread_t's 'machine' member.
+  void *ifps;           // Offset 0x550
+  uint32_t pad4[48];
+  int iotier_override;  // Offset 0x618
+} thread_fake_highsierra_debug_17G7020_t;
 
 typedef struct thread_fake_sierra
 {
@@ -3652,6 +3740,93 @@ typedef struct thread_fake_mavericks_debug
   uint32_t pad4[50];
   int iotier_override;  // Offset 0x570
 } thread_fake_mavericks_debug_t;
+
+uint64_t g_iotier_override_offset = (uint64_t) -1;
+
+void initialize_thread_offsets()
+{
+  if (!find_kernel_private_functions()) {
+    return;
+  }
+
+  if (macOS_Mojave()) {
+    if (kernel_type_is_release()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_mojave, iotier_override);
+    } else if (kernel_type_is_development()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_mojave_development, iotier_override);
+    } else if (kernel_type_is_debug()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_mojave_debug, iotier_override);
+    }
+  } else if (macOS_HighSierra()) {
+    if (macOS_HighSierra_less_than_17G7020()) {
+      if (kernel_type_is_release()) {
+        g_iotier_override_offset =
+          offsetof(struct thread_fake_highsierra, iotier_override);
+      } else if (kernel_type_is_development()) {
+        g_iotier_override_offset =
+          offsetof(struct thread_fake_highsierra_development, iotier_override);
+      } else if (kernel_type_is_debug()) {
+        g_iotier_override_offset =
+          offsetof(struct thread_fake_highsierra_debug, iotier_override);
+      }
+    } else {
+      if (kernel_type_is_release()) {
+        g_iotier_override_offset =
+          offsetof(struct thread_fake_highsierra_17G7020, iotier_override);
+      } else if (kernel_type_is_development()) {
+        g_iotier_override_offset =
+          offsetof(struct thread_fake_highsierra_development_17G7020, iotier_override);
+      } else if (kernel_type_is_debug()) {
+        g_iotier_override_offset =
+          offsetof(struct thread_fake_highsierra_debug_17G7020, iotier_override);
+      }
+    }
+  } else if (macOS_Sierra()) {
+    if (kernel_type_is_release()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_sierra, iotier_override);
+    } else if (kernel_type_is_development()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_sierra_development, iotier_override);
+    } else if (kernel_type_is_debug()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_sierra_debug, iotier_override);
+    }
+  } else if (OSX_ElCapitan()) {
+    if (kernel_type_is_release()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_elcapitan, iotier_override);
+    } else if (kernel_type_is_development()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_elcapitan_development, iotier_override);
+    } else if (kernel_type_is_debug()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_elcapitan_debug, iotier_override);
+    }
+  } else if (OSX_Yosemite()) {
+    if (kernel_type_is_release()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_yosemite, iotier_override);
+    } else if (kernel_type_is_development()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_yosemite_development, iotier_override);
+    } else if (kernel_type_is_debug()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_yosemite_debug, iotier_override);
+    }
+  } else if (OSX_Mavericks()) {
+    if (kernel_type_is_release()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_mavericks, iotier_override);
+    } else if (kernel_type_is_debug()) {
+      g_iotier_override_offset =
+        offsetof(struct thread_fake_mavericks_debug, iotier_override);
+    }
+  }
+}
 
 // From the xnu kernel's osfmk/kern/thread.h
 #define TH_OPT_INTMASK  0x0003  /* interrupt / abort level */
@@ -3920,97 +4095,6 @@ extern "C" bool invalid_fp_thread_state()
     retval = (thread_state->fp_valid == 0);
   }
   return retval;
-}
-#endif
-
-#if (0)
-// Don't do too much here -- interrupts are cleared!  For example, the kernel
-// panics if you call get_kernel_type() for the first time, or if you call
-// printf() at all!
-//
-// This method causes trouble with the development kernel in recent minor
-// updates on macOS 12 and 13 -- kernel panics, often with the message
-// "Assertion failed: thread->user_promotion_basepri == 0".  And it is
-// probably unnecessary.  So from now on we'll try to do without it.
-extern "C" void reset_iotier_override()
-{
-  thread_t thread = current_thread();
-  if (!thread) {
-    return;
-  }
-
-  static vm_map_offset_t offset_in_struct = -1;
-  if (offset_in_struct == -1) {
-    if (macOS_Mojave()) {
-      if (kernel_type_is_release()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_mojave, iotier_override);
-      } else if (kernel_type_is_development()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_mojave_development, iotier_override);
-      } else if (kernel_type_is_debug()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_mojave_debug, iotier_override);
-      }
-    } else if (macOS_HighSierra()) {
-      if (kernel_type_is_release()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_highsierra, iotier_override);
-      } else if (kernel_type_is_development()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_highsierra_development, iotier_override);
-      } else if (kernel_type_is_debug()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_highsierra_debug, iotier_override);
-      }
-    } else if (macOS_Sierra()) {
-      if (kernel_type_is_release()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_sierra, iotier_override);
-      } else if (kernel_type_is_development()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_sierra_development, iotier_override);
-      } else if (kernel_type_is_debug()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_sierra_debug, iotier_override);
-      }
-    } else if (OSX_ElCapitan()) {
-      if (kernel_type_is_release()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_elcapitan, iotier_override);
-      } else if (kernel_type_is_development()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_elcapitan_development, iotier_override);
-      } else if (kernel_type_is_debug()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_elcapitan_debug, iotier_override);
-      }
-    } else if (OSX_Yosemite()) {
-      if (kernel_type_is_release()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_yosemite, iotier_override);
-      } else if (kernel_type_is_development()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_yosemite_development, iotier_override);
-      } else if (kernel_type_is_debug()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_yosemite_debug, iotier_override);
-      }
-    } else if (OSX_Mavericks()) {
-      if (kernel_type_is_release()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_mavericks, iotier_override);
-      } else if (kernel_type_is_debug()) {
-        offset_in_struct =
-          offsetof(struct thread_fake_mavericks_debug, iotier_override);
-      }
-    }
-  }
-
-  if (offset_in_struct != -1) {
-    *((int *)((vm_map_offset_t)thread + offset_in_struct)) =
-      THROTTLE_LEVEL_NONE;
-  }
 }
 #endif
 
@@ -5983,6 +6067,22 @@ bool get_module_info(proc_t proc, const char *module_name,
     if (!proc_copyinstr(proc_map, path_addr, path_local, sizeof(path_local))) {
       continue;
     }
+    // If possible, canonicalize path_local.
+    char fixed_path_local[PATH_MAX];
+    fixed_path_local[0] = 0;
+    vfs_context_t context = vfs_context_create(NULL);
+    if (context) {
+      vnode_t module_vnode;
+      if (!vnode_lookup(path_local, 0, &module_vnode, context)) {
+        int len = sizeof(fixed_path_local);
+        vn_getpath(module_vnode, fixed_path_local, &len);
+        vnode_put(module_vnode);
+      }
+      vfs_context_rele(context);
+    }
+    if (fixed_path_local[0]) {
+      strncpy(path_local, fixed_path_local, sizeof(path_local));
+    }
     if (module_name && module_name[0]) {
       if (module_name_is_basename) {
         matched = 
@@ -6617,9 +6717,9 @@ bool ensure_user_region_wired(vm_map_t map, vm_map_offset_t start,
 // valid for a particular process (identified by its 64-bit "unique id").
 //
 // Exactly one hook_t structure is created (and added to the linked list) as a
-// cast hook for a process in which we want to set hooks.  It usually lives as
-// long as the process itself.  It's used to keep track of the work needed to
-// create user hooks.
+// cast hook for a process in which we want to set hooks.  It lives as long as
+// the process itself.  It's used to keep track of the work needed to create
+// user hooks.
 //
 // A user hook is one that we wish to "set" in a given process.
 //
@@ -6777,7 +6877,7 @@ typedef struct _user_hook_desc_64bit {
     // For interpose hooks
     user_addr_t orig_function;       // const void *
     // For patch hooks
-    user_addr_t caller_func_ptr;     // const void *
+    user_addr_t func_caller_ptr;     // const void *
   };
   user_addr_t orig_function_name;    // const char *
   user_addr_t orig_module_name;      // const char *, only for patch hooks
@@ -6789,7 +6889,7 @@ typedef struct _user_hook_desc_32bit {
     // For interpose hooks
     user32_addr_t orig_function;     // const void *
     // For patch hooks
-    user32_addr_t caller_func_ptr;   // const void *
+    user32_addr_t func_caller_ptr;   // const void *
   };
   user32_addr_t orig_function_name;  // const char *
   user32_addr_t orig_module_name;    // const char *, only for patch hooks
@@ -6801,7 +6901,7 @@ typedef struct _hook_desc {
     // For interpose hooks
     user_addr_t orig_function;
     // For patch hooks
-    user_addr_t caller_func_ptr;
+    user_addr_t func_caller_ptr;
   };
   char orig_function_name[PATH_MAX];
   char orig_module_name[PATH_MAX];   // Only for patch hooks
@@ -6843,8 +6943,32 @@ typedef struct _hook {
   uint32_t num_patch_hooks;             // Only used in cast hook
   uint32_t num_interpose_hooks;         // Only used in cast hook
   bool no_numerical_addrs;              // Only used in cast hook
+  bool is_dynamic_hook;                 // Only used in patch hook
+  bool is_cast_hook;
   uint16_t orig_code;
 } hook_t;
+
+// We use this linked list to ensure that the "current" patch hook can always
+// be found when we need it (in methods that have been "called", indirectly,
+// from the hook function, like reset_hook() and get_dynamic_caller() below).
+// Now that we support dynamically added patch hooks, we can no longer depend
+// on being able to look up a patch hook using its hook address.  There's no
+// reasonable way we can prevent a hook function from being used by more than
+// one dynamically added patch hook.  So the linked list of hook_t objects may
+// contain more than one with the same hook_addr.
+typedef struct _hook_thread_info {
+  LIST_ENTRY(_hook_thread_info) list_entry;
+  // A thread on which one or more patch hooks has recently executed.  Each
+  // value of hook_thread is unique in this list, per process.
+  thread_t hook_thread;
+  // The patch hook that has executed most recently on hook_thread. This
+  // value will remain current (and correct) while patch_hook->hook_addr is
+  // running, if hook_thread is the current thread.  The same patch_hook may
+  // appear more than once in this list, per process.  This will happen if
+  // patch_hook runs on different threads.
+  hook_t *patch_hook;
+  uint64_t unique_pid;
+} hook_thread_info_t;
 
 #define CALL_ORIG_FUNC_SIZE 0x20
 #define MAX_CALL_ORIG_FUNCS 128 // PAGE_SIZE / CALL_ORIG_FUNC_SIZE
@@ -6888,6 +7012,9 @@ typedef struct _hook {
 
 // unsigned char[] = {0xcd, HC_INT4} when stored in little endian format
 #define HC_INT4_OPCODE_SHORT ((HC_INT4 << 8) + 0xcd)
+
+// unsigned char[] = {0xcd, HC_INT5} when stored in little endian format
+#define HC_INT5_OPCODE_SHORT ((HC_INT5 << 8) + 0xcd)
 
 // xor   %rax, %rax
 // ret
@@ -6962,6 +7089,8 @@ lck_attr_t *all_hooks_attr = NULL;
 lck_mtx_t *all_hooks_mlock = NULL;
 LIST_HEAD(hook_list, _hook);
 struct hook_list g_all_hooks;
+LIST_HEAD(hook_thread_info_list, _hook_thread_info);
+struct hook_thread_info_list g_all_hook_thread_infos;
 
 bool check_init_locks()
 {
@@ -6970,6 +7099,7 @@ bool check_init_locks()
   }
 
   LIST_INIT(&g_all_hooks);
+  LIST_INIT(&g_all_hook_thread_infos);
   all_hooks_grp_attr = lck_grp_attr_alloc_init();
   if (!all_hooks_grp_attr) {
     return false;
@@ -7014,6 +7144,16 @@ hook_t *create_hook()
   return retval;
 }
 
+hook_thread_info_t *create_hook_thread_info()
+{
+  hook_thread_info_t *retval = (hook_thread_info_t *)
+    IOMalloc(sizeof(hook_thread_info_t));
+  if (retval) {
+    bzero(retval, sizeof(hook_thread_info_t));
+  }
+  return retval;
+}
+
 void add_hook(hook_t *hookp)
 {
   if (!hookp || !check_init_locks()) {
@@ -7021,6 +7161,16 @@ void add_hook(hook_t *hookp)
   }
   all_hooks_lock();
   LIST_INSERT_HEAD(&g_all_hooks, hookp, list_entry);
+  all_hooks_unlock();
+}
+
+void add_hook_thread_info(hook_thread_info_t *infop)
+{
+  if (!infop || !check_init_locks()) {
+    return;
+  }
+  all_hooks_lock();
+  LIST_INSERT_HEAD(&g_all_hook_thread_infos, infop, list_entry);
   all_hooks_unlock();
 }
 
@@ -7048,6 +7198,14 @@ void free_hook(hook_t *hookp)
   IOFree(hookp, sizeof(hook_t));
 }
 
+void free_hook_thread_info(hook_thread_info_t *infop)
+{
+  if (!infop) {
+    return;
+  }
+  IOFree(infop, sizeof(hook_thread_info_t));
+}
+
 void remove_hook(hook_t *hookp)
 {
   if (!hookp || !check_init_locks()) {
@@ -7056,6 +7214,17 @@ void remove_hook(hook_t *hookp)
   all_hooks_lock();
   LIST_REMOVE(hookp, list_entry);
   free_hook(hookp);
+  all_hooks_unlock();
+}
+
+void remove_hook_thread_info(hook_thread_info_t *infop)
+{
+  if (!infop || !check_init_locks()) {
+    return;
+  }
+  all_hooks_lock();
+  LIST_REMOVE(infop, list_entry);
+  free_hook_thread_info(infop);
   all_hooks_unlock();
 }
 
@@ -7077,22 +7246,62 @@ hook_t *find_hook(user_addr_t orig_addr, uint64_t unique_pid)
   return hookp;
 }
 
-hook_t *find_hook_with_hook_addr(user_addr_t hook_addr, uint64_t unique_pid)
+hook_thread_info_t *find_hook_thread_info(thread_t thread, uint64_t unique_pid)
 {
-  if (!check_init_locks() || !hook_addr || !unique_pid) {
+  if (!check_init_locks() || !thread || !unique_pid) {
+    return NULL;
+  }
+  all_hooks_lock();
+  hook_thread_info_t *infop = NULL;
+  LIST_FOREACH(infop, &g_all_hook_thread_infos, list_entry) {
+    if ((infop->hook_thread == thread) && (infop->unique_pid == unique_pid)) {
+      break;
+    }
+  }
+  all_hooks_unlock();
+  return infop;
+}
+
+hook_t *find_hook_by_thread(thread_t thread, uint64_t unique_pid)
+{
+  if (!check_init_locks() || !thread || !unique_pid) {
     return NULL;
   }
   all_hooks_lock();
   hook_t *hookp = NULL;
-  LIST_FOREACH(hookp, &g_all_hooks, list_entry) {
-    if ((hookp->hook_addr == hook_addr) &&
-        (hookp->unique_pid == unique_pid))
-    {
+  hook_thread_info_t *infop = NULL;
+  LIST_FOREACH(infop, &g_all_hook_thread_infos, list_entry) {
+    if ((infop->hook_thread == thread) && (infop->unique_pid == unique_pid)) {
+      hookp = infop->patch_hook;
       break;
     }
   }
   all_hooks_unlock();
   return hookp;
+}
+
+// There's no reasonable way to prevent a hook function from being used by
+// more than one dynamically added patch hook.  So we've now got to live with
+// the possibility that a given hook function will have been used more than
+// once.
+bool hook_exists_with_hook_addr(user_addr_t hook_addr, uint64_t unique_pid)
+{
+  if (!check_init_locks() || !hook_addr || !unique_pid) {
+    return false;
+  }
+  all_hooks_lock();
+  bool retval = false;
+  hook_t *hookp = NULL;
+  LIST_FOREACH(hookp, &g_all_hooks, list_entry) {
+    if ((hookp->hook_addr == hook_addr) &&
+        (hookp->unique_pid == unique_pid))
+    {
+      retval = true;
+      break;
+    }
+  }
+  all_hooks_unlock();
+  return retval;
 }
 
 hook_t *find_hook_with_add_image_func(uint64_t unique_pid)
@@ -7111,12 +7320,36 @@ hook_t *find_hook_with_add_image_func(uint64_t unique_pid)
   return hookp;
 }
 
+hook_t *find_cast_hook(uint64_t unique_pid)
+{
+  if (!check_init_locks() || !unique_pid) {
+    return NULL;
+  }
+  all_hooks_lock();
+  hook_t *hookp = NULL;
+  LIST_FOREACH(hookp, &g_all_hooks, list_entry) {
+    if ((hookp->unique_pid == unique_pid) && hookp->is_cast_hook) {
+      break;
+    }
+  }
+  all_hooks_unlock();
+  return hookp;
+}
+
 void remove_process_hooks(uint64_t unique_pid)
 {
   if (!check_init_locks() || !unique_pid) {
     return;
   }
   all_hooks_lock();
+  hook_thread_info_t *infop = NULL;
+  hook_thread_info_t *tmp_infop = NULL;
+  LIST_FOREACH_SAFE(infop, &g_all_hook_thread_infos, list_entry, tmp_infop) {
+    if (infop->unique_pid == unique_pid) {
+      LIST_REMOVE(infop, list_entry);
+      free_hook_thread_info(infop);
+    }
+  }
   hook_t *hookp = NULL;
   hook_t *tmp_hookp = NULL;
   LIST_FOREACH_SAFE(hookp, &g_all_hooks, list_entry, tmp_hookp) {
@@ -7201,6 +7434,12 @@ void destroy_all_hooks()
     return;
   }
   all_hooks_lock();
+  hook_thread_info_t *infop = NULL;
+  hook_thread_info_t *tmp_infop = NULL;
+  LIST_FOREACH_SAFE(infop, &g_all_hook_thread_infos, list_entry, tmp_infop) {
+    LIST_REMOVE(infop, list_entry);
+    free_hook_thread_info(infop);
+  }
   hook_t *hookp = NULL;
   hook_t *tmp_hookp = NULL;
   LIST_FOREACH_SAFE(hookp, &g_all_hooks, list_entry, tmp_hookp) {
@@ -7505,6 +7744,7 @@ bool maybe_cast_hook(proc_t proc)
   hookp->dyld_runInitializers = dyld_runInitializers;
   hookp->orig_dyld_runInitializers = orig_dyld_runInitializers;
   hookp->no_numerical_addrs = no_numerical_addrs;
+  hookp->is_cast_hook = true;
 
   // If debug logging is on, suspend the parent process if we might have hooks
   // in it.  Our initialization can take a while if debug logging is on, and
@@ -7782,7 +8022,7 @@ bool get_valid_user_hooks(proc_t proc, char *inserted_dylib_path,
     }
 
     if (user_hooks[i].orig_module_name[0]) {
-      if (!user_hooks[i].caller_func_ptr) {
+      if (!user_hooks[i].func_caller_ptr) {
         printf("HookCase(%s[%d]): get_valid_user_hooks(%s): No caller specified for function \"%s\" in module \"%s\"\n",
                procname, proc_pid(proc), inserted_dylib_path, user_hooks[i].orig_function_name, user_hooks[i].orig_module_name);
         user_hooks[i].hook_function = 0;
@@ -7871,7 +8111,7 @@ bool check_for_pending_user_hooks(hook_desc *patch_hooks,
   if (patch_hooks) {
     for (i = 0; i < num_patch_hooks; ++i) {
       if (!patch_hooks[i].hook_function ||
-          !patch_hooks[i].caller_func_ptr ||
+          !patch_hooks[i].func_caller_ptr ||
           !patch_hooks[i].orig_function_name[0] ||
           !patch_hooks[i].orig_module_name[0])
       {
@@ -8372,6 +8612,85 @@ bool function_name_to_numerical_addr(char *function_name,
   return true;
 }
 
+hook_t *create_patch_hook(proc_t proc, vm_map_t proc_map, hook_t *cast_hookp,
+                          user_addr_t orig_func_addr, user_addr_t hook_addr,
+                          user_addr_t func_caller_ptr, uint32_t prologue,
+                          bool is_64bit)
+{
+  if (!proc || !proc_map || !cast_hookp ||
+      !orig_func_addr || !hook_addr)
+  {
+    return NULL;
+  }
+
+  hook_t *hookp = create_hook();
+  if (!hookp) {
+    return NULL;
+  }
+
+  hookp->patch_hook_lock = IORecursiveLockAlloc();
+  if (!hookp->patch_hook_lock) {
+    free_hook(hookp);
+    return NULL;
+  }
+
+  bool use_call_orig_func =
+    can_use_call_orig_func(proc, cast_hookp, prologue);
+  if (use_call_orig_func) {
+    if (!set_call_orig_func(proc, proc_map, hookp, cast_hookp,
+                            orig_func_addr))
+    {
+      free_hook(hookp);
+      return NULL;
+    }
+  }
+
+  if (func_caller_ptr) {
+    user_addr_t caller_addr = orig_func_addr;
+    if (use_call_orig_func) {
+      caller_addr = hookp->call_orig_func_addr;
+    }
+    size_t sizeof_caller_addr;
+    if (is_64bit) {
+      sizeof_caller_addr = sizeof(uint64_t);
+    } else {
+      sizeof_caller_addr = sizeof(uint32_t);
+    }
+    if (!proc_copyout(proc_map, &caller_addr, func_caller_ptr,
+                      sizeof_caller_addr, false, true))
+    {
+      free_hook(hookp);
+      return NULL;
+    }
+  }
+
+  uint16_t orig_code = (uint16_t) (prologue & 0xffff);
+
+  hookp->pid = cast_hookp->pid;
+  hookp->unique_pid = cast_hookp->unique_pid;
+  strncpy(hookp->proc_path, cast_hookp->proc_path,
+          sizeof(hookp->proc_path));
+  strncpy(hookp->inserted_dylib_path, cast_hookp->inserted_dylib_path,
+          sizeof(hookp->inserted_dylib_path));
+  hookp->inserted_dylib_textseg = cast_hookp->inserted_dylib_textseg;
+  hookp->inserted_dylib_textseg_len = cast_hookp->inserted_dylib_textseg_len;
+  hookp->orig_addr = orig_func_addr;
+  hookp->orig_code = orig_code;
+  hookp->hook_addr = hook_addr;
+  hookp->state = hook_state_set;
+  add_hook(hookp);
+
+  uint16_t new_code = HC_INT1_OPCODE_SHORT;
+  if (!proc_copyout(proc_map, &new_code, orig_func_addr,
+                    sizeof(new_code), true, false))
+  {
+    remove_hook(hookp);
+    return NULL;
+  }
+
+  return hookp;
+}
+
 void set_patch_hooks(proc_t proc, vm_map_t proc_map, hook_t *cast_hookp,
                      hook_desc *patch_hooks, uint32_t num_patch_hooks)
 {
@@ -8390,14 +8709,14 @@ void set_patch_hooks(proc_t proc, vm_map_t proc_map, hook_t *cast_hookp,
   int i;
   for (i = 0; i < num_patch_hooks; ++i) {
     if (!patch_hooks[i].hook_function ||
-        !patch_hooks[i].caller_func_ptr ||
+        !patch_hooks[i].func_caller_ptr ||
         !patch_hooks[i].orig_function_name[0] ||
         !patch_hooks[i].orig_module_name[0])
     {
       continue;
     }
 
-    if (find_hook_with_hook_addr(patch_hooks[i].hook_function, unique_pid)) {
+    if (hook_exists_with_hook_addr(patch_hooks[i].hook_function, unique_pid)) {
       printf("HookCase(%s[%d]): set_patch_hooks(%s): The function at address \'0x%llx\' has already been used as a hook\n",
              procname, proc_pid(proc), cast_hookp->inserted_dylib_path, patch_hooks[i].hook_function);
       patch_hooks[i].hook_function = 0;
@@ -8474,77 +8793,13 @@ void set_patch_hooks(proc_t proc, vm_map_t proc_map, hook_t *cast_hookp,
       }
       continue;
     }
-    uint16_t orig_code = (uint16_t) (prologue & 0xffff);
 
-    hook_t *hookp = create_hook();
-    if (!hookp) {
-      continue;
-    }
-
-    hookp->patch_hook_lock = IORecursiveLockAlloc();
-    if (!hookp->patch_hook_lock) {
-      free_hook(hookp);
-      continue;
-    }
-
-    bool use_call_orig_func =
-      can_use_call_orig_func(proc, cast_hookp, prologue);
-    if (use_call_orig_func) {
-      if (!set_call_orig_func(proc, proc_map, hookp, cast_hookp, orig_addr)) {
-        free_hook(hookp);
-        continue;
-      }
-    }
-
-    user_addr_t caller_addr = orig_addr;
-    if (use_call_orig_func) {
-      caller_addr = hookp->call_orig_func_addr;
-    }
-    size_t sizeof_caller_addr;
-    if (is_64bit) {
-      sizeof_caller_addr = sizeof(uint64_t);
-    } else {
-      sizeof_caller_addr = sizeof(uint32_t);
-    }
-    if (!proc_copyout(proc_map, &caller_addr, patch_hooks[i].caller_func_ptr,
-                      sizeof_caller_addr, false, true))
-    {
-      free_hook(hookp);
-      continue;
-    }
-
-    uint16_t new_code = HC_INT1_OPCODE_SHORT;
-    if (!proc_copyout(proc_map, &new_code, orig_addr,
-                      sizeof(new_code), true, false))
-    {
-      free_hook(hookp);
-      continue;
-    }
-
-#if (0)
-    // I'm not sure this really helps.
-    if (use_call_orig_func) {
-      ensure_user_region_wired(proc_map, orig_addr,
-                               orig_addr + sizeof(new_code));
-    }
-#endif
-
-    hookp->pid = cast_hookp->pid;
-    hookp->unique_pid = cast_hookp->unique_pid;
-    strncpy(hookp->proc_path, cast_hookp->proc_path,
-            sizeof(hookp->proc_path));
-    strncpy(hookp->inserted_dylib_path, cast_hookp->inserted_dylib_path,
-            sizeof(hookp->inserted_dylib_path));
-    hookp->inserted_dylib_textseg = cast_hookp->inserted_dylib_textseg;
-    hookp->inserted_dylib_textseg_len = cast_hookp->inserted_dylib_textseg_len;
-    hookp->orig_addr = orig_addr;
-    hookp->orig_code = orig_code;
-    hookp->hook_addr = patch_hooks[i].hook_function;
+    create_patch_hook(proc, proc_map, cast_hookp, orig_addr,
+                      patch_hooks[i].hook_function,
+                      patch_hooks[i].func_caller_ptr,
+                      prologue, is_64bit);
 
     patch_hooks[i].hook_function = 0;
-
-    hookp->state = hook_state_set;
-    add_hook(hookp);
   }
 }
 
@@ -8780,6 +9035,22 @@ void set_interpose_hooks(proc_t proc, vm_map_t proc_map, hook_t *cast_hookp,
     if (!proc_copyinstr(proc_map, path_addr, path_local, sizeof(path_local))) {
       continue;
     }
+    // If possible, canonicalize path_local.
+    char fixed_path_local[PATH_MAX];
+    fixed_path_local[0] = 0;
+    vfs_context_t context = vfs_context_create(NULL);
+    if (context) {
+      vnode_t module_vnode;
+      if (!vnode_lookup(path_local, 0, &module_vnode, context)) {
+        int len = sizeof(fixed_path_local);
+        vn_getpath(module_vnode, fixed_path_local, &len);
+        vnode_put(module_vnode);
+      }
+      vfs_context_rele(context);
+    }
+    if (fixed_path_local[0]) {
+      strncpy(path_local, fixed_path_local, sizeof(path_local));
+    }
     // Don't set any interpose hooks in our hook library.  That would prevent
     // calls from hooks to their original functions from working properly.
     if (!strcmp(path_local, cast_hookp->inserted_dylib_path)) {
@@ -8929,7 +9200,6 @@ void process_hook_flying(hook_t *hookp, x86_saved_state_t *intr_state)
     do_report(report);
 #endif
 
-    remove_hook(hookp);
     return;
   }
 
@@ -9127,6 +9397,8 @@ void process_hook_set(hook_t *hookp, x86_saved_state_t *intr_state)
     return;
   }
 
+  uint64_t unique_pid = proc_uniqueid(proc);
+
   user_addr_t call_orig_func_addr = hookp->call_orig_func_addr;
 
   user_addr_t return_address = 0;
@@ -9140,11 +9412,11 @@ void process_hook_set(hook_t *hookp, x86_saved_state_t *intr_state)
   user_addr_t hook_textseg = hookp->inserted_dylib_textseg;
   user_addr_t hook_textseg_end =
     hook_textseg + hookp->inserted_dylib_textseg_len;
-  bool called_from_hook =
+  bool called_from_hook_library =
     ((return_address >= hook_textseg) && (return_address < hook_textseg_end));
 
   if (call_orig_func_addr) {
-    if (called_from_hook) {
+    if (called_from_hook_library) {
       if (intr_state->flavor == x86_SAVED_STATE64) {
         intr_state->ss_64.isf.rip = call_orig_func_addr;
       } else {     // flavor == x86_SAVED_STATE32
@@ -9173,7 +9445,7 @@ void process_hook_set(hook_t *hookp, x86_saved_state_t *intr_state)
       {
         hookp->state = hook_state_unset;
       }
-      if (called_from_hook) {
+      if (called_from_hook_library) {
         if (intr_state->flavor == x86_SAVED_STATE64) {
           intr_state->ss_64.isf.rip = hookp->orig_addr;
         } else {     // flavor == x86_SAVED_STATE32
@@ -9191,6 +9463,26 @@ void process_hook_set(hook_t *hookp, x86_saved_state_t *intr_state)
         task_deallocate(task);
       }
       unlock_hook(hookp->patch_hook_lock);
+    }
+  }
+
+  // Keep g_all_hook_thread_infos up to date.
+  hook_thread_info_t *infop =
+    find_hook_thread_info(current_thread(), unique_pid);
+  if (infop) {
+    if (check_init_locks()) {
+      all_hooks_lock();
+      infop->patch_hook = hookp;
+      infop->unique_pid = unique_pid;
+      all_hooks_unlock();
+    }
+  } else {
+    infop = create_hook_thread_info();
+    if (infop) {
+      infop->patch_hook = hookp;
+      infop->hook_thread = current_thread();
+      infop->unique_pid = unique_pid;
+      add_hook_thread_info(infop);
     }
   }
 
@@ -9242,7 +9534,12 @@ void check_hook_state(x86_saved_state_t *intr_state)
 // A hook has called reset_hook() in the hook library.  We don't need to do
 // anything if it's not a patch hook, or if its original method doesn't have a
 // standard C/C++ prologue -- in either of those cases, the hook's state won't
-// be hook_state_unset.
+// be hook_state_unset.  Note that we can't call IOMalloc() every time this
+// method runs, directly or indirectly.  Calling IOMalloc() that often and
+// that quickly triggers an Apple bug in the kernel's memory allocation code,
+// which causes kernel panics with error messages like "Element
+// 0xNNNNNNNNNNNNNNNN from zone kalloc.32 caught being freed to wrong zone
+// kalloc.16".
 void reset_hook(x86_saved_state_t *intr_state)
 {
   if (!intr_state) {
@@ -9270,9 +9567,10 @@ void reset_hook(x86_saved_state_t *intr_state)
     return;
   }
 
-  hook_t *hookp =
-    find_hook_with_hook_addr(hook_addr, proc_uniqueid(proc));
-  if (!hookp || (hookp->state != hook_state_unset)) {
+  hook_t *hookp = find_hook_by_thread(current_thread(), proc_uniqueid(proc));
+  if (!hookp || (hookp->hook_addr != hook_addr) ||
+      (hookp->state != hook_state_unset))
+  {
     vm_map_deallocate(proc_map);
     return;
   }
@@ -9375,15 +9673,6 @@ void on_add_image(x86_saved_state_t *intr_state)
 
   thread_interrupt_level(old_state);
 
-  // Delete our cast hook if we have no more use for it.
-  if (!check_for_pending_user_hooks(hookp->patch_hooks,
-                                    hookp->num_patch_hooks,
-                                    hookp->interpose_hooks,
-                                    hookp->num_interpose_hooks))
-  {
-    remove_hook(hookp);
-  }
-
   vm_map_deallocate(proc_map);
 
 #ifdef DEBUG_LOG
@@ -9393,6 +9682,167 @@ void on_add_image(x86_saved_state_t *intr_state)
            proc_pid(proc), proc_uniqueid(proc), module_info.path);
   do_report(report);
 #endif
+}
+
+// A hook has called add_patch_hook() in the hook library.  We don't need to
+// do anything if the exact same patch hook has already been created (one with
+// the same orig_func_addr and hook_addr).  And if a patch hook for
+// orig_func_addr already exists with a different hook function, we change its
+// hook_addr to point to the new hook function.  Otherwise we dynamically add
+// a new patch hook.  Note that we can't call IOMalloc() every time this
+// method runs, directly or indirectly.  Calling IOMalloc() that often and
+// that quickly triggers an Apple bug in the kernel's memory allocation code,
+// which causes kernel panics with error messages like "Element
+// 0xNNNNNNNNNNNNNNNN from zone kalloc.32 caught being freed to wrong zone
+// kalloc.16".
+void add_patch_hook(x86_saved_state_t *intr_state)
+{
+  if (!intr_state) {
+    return;
+  }
+
+  proc_t proc = current_proc();
+
+  vm_map_t proc_map = task_map_for_proc(proc);
+  if (!proc_map) {
+    return;
+  }
+
+  hook_t *cast_hookp = find_cast_hook(proc_uniqueid(proc));
+  if (!cast_hookp) {
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  pid_t pid = proc_pid(proc);
+  char procname[PATH_MAX];
+  proc_name(pid, procname, sizeof(procname));
+
+  user_addr_t orig_func_addr = 0;
+  user_addr_t hook_addr = 0;
+  if (intr_state->flavor == x86_SAVED_STATE64) {
+    orig_func_addr = intr_state->ss_64.rdi;
+    hook_addr = intr_state->ss_64.rsi;
+  } else { // flavor == x86_SAVED_STATE32
+    uint32_t stack[4];
+    bzero(stack, sizeof(stack));
+    proc_copyin(proc_map, intr_state->ss_32.ebp, stack, sizeof(stack));
+    orig_func_addr = stack[2];
+    hook_addr = stack[3];
+  }
+  if (!orig_func_addr || !hook_addr) {
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  hook_t *orig_func_hook = find_hook(orig_func_addr, proc_uniqueid(proc));
+
+  // Do nothing if the exact same patch hook has already been created.
+  if (orig_func_hook && (orig_func_hook->hook_addr == hook_addr)) {
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  // If a patch hook for orig_func_addr already exists with a different hook
+  // function, change its hook_addr to point to the new hook function.  But
+  // don't allow this for a non-dynamically created hook.  An original
+  // function can't be assigned more than one hook.
+  if (orig_func_hook) {
+    if (orig_func_hook->is_dynamic_hook && check_init_locks()) {
+      all_hooks_lock();
+      orig_func_hook->hook_addr = hook_addr;
+      all_hooks_unlock();
+    }
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  // Otherwise create a new patch hook with the appropriate settings.
+  uint32_t prologue = 0;
+  if (!proc_copyin(proc_map, orig_func_addr, &prologue, sizeof(prologue))) {
+    printf("HookCase(%s[%d]): add_patch_hook(): \'0x%llx\' is an invalid address and cannot be patched\n",
+           procname, pid, orig_func_addr);
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  wait_interrupt_t old_state = thread_interrupt_level(THREAD_UNINT);
+
+  hook_t *new_hook =
+    create_patch_hook(proc, proc_map, cast_hookp, orig_func_addr,
+                      hook_addr, NULL, prologue,
+                      intr_state->flavor == x86_SAVED_STATE64);
+  if (new_hook) {
+    new_hook->is_dynamic_hook = true;
+  }
+
+  thread_interrupt_level(old_state);
+
+  vm_map_deallocate(proc_map);
+}
+
+// A dynamically added patch hook has called get_dynamic_caller() in the hook
+// library.  This is because a single hook function may end up hooking
+// more than one dynamically patched original function.  So we can't use a
+// global "caller" variable there.  Note that we can't call IOMalloc() every
+// time this method runs, directly or indirectly.  Calling IOMalloc() that
+// often and that quickly triggers an Apple bug in the kernel's memory
+// allocation code, which causes kernel panics with error messages like
+// "Element 0xNNNNNNNNNNNNNNNN from zone kalloc.32 caught being freed to wrong
+// zone kalloc.16".
+void get_dynamic_caller(x86_saved_state_t *intr_state)
+{
+  if (!intr_state) {
+    return;
+  }
+
+  // Initialize "return value" to NULL.
+  if (intr_state->flavor == x86_SAVED_STATE64) {
+    intr_state->ss_64.rax = 0;
+  } else { // flavor == x86_SAVED_STATE32
+    intr_state->ss_32.eax = 0;
+  }
+
+  proc_t proc = current_proc();
+
+  vm_map_t proc_map = task_map_for_proc(proc);
+  if (!proc_map) {
+    return;
+  }
+
+  user_addr_t hook_addr = 0;
+  if (intr_state->flavor == x86_SAVED_STATE64) {
+    hook_addr = intr_state->ss_64.rdi;
+  } else { // flavor == x86_SAVED_STATE32
+    uint32_t stack[3];
+    bzero(stack, sizeof(stack));
+    proc_copyin(proc_map, intr_state->ss_32.ebp, stack, sizeof(stack));
+    hook_addr = stack[2];
+  }
+  if (!hook_addr) {
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  hook_t *hookp = find_hook_by_thread(current_thread(), proc_uniqueid(proc));
+  if (!hookp || !hookp->is_dynamic_hook || (hookp->hook_addr != hook_addr)) {
+    vm_map_deallocate(proc_map);
+    return;
+  }
+
+  user_addr_t caller_addr = hookp->orig_addr;
+  if (hookp->call_orig_func_addr) {
+    caller_addr = hookp->call_orig_func_addr;
+  }
+
+  // Set "return value".
+  if (intr_state->flavor == x86_SAVED_STATE64) {
+    intr_state->ss_64.rax = caller_addr;
+  } else { // flavor == x86_SAVED_STATE32
+    intr_state->ss_32.eax = (uint32_t) caller_addr;
+  }
+
+  vm_map_deallocate(proc_map);
 }
 
 typedef struct _posix_spawnattr *_posix_spawnattr_t;
@@ -10362,10 +10812,14 @@ char old_hc_int3_stub[16];
 idt64_entry old_hc_int4_idt_entry;
 char old_hc_int4_stub[16];
 
+idt64_entry old_hc_int5_idt_entry;
+char old_hc_int5_stub[16];
+
 bool s_installed_hc_int1_handler = false;
 bool s_installed_hc_int2_handler = false;
 bool s_installed_hc_int3_handler = false;
 bool s_installed_hc_int4_handler = false;
+bool s_installed_hc_int5_handler = false;
 
 // In the macOS 10.13.2 release Apple implemented KPTI (kernel page-table
 // isolation) as a workaround for Intel's Meltdown bug
@@ -10879,6 +11333,14 @@ bool install_intr_handler(int intr_num)
       old_stub = old_hc_int4_stub;
       raw_handler = (vm_offset_t) hc_int4_raw_handler;
       break;
+    case HC_INT5:
+      if (s_installed_hc_int5_handler) {
+        return true;
+      }
+      old_idt_entry = &old_hc_int5_idt_entry;
+      old_stub = old_hc_int5_stub;
+      raw_handler = (vm_offset_t) hc_int5_raw_handler;
+      break;
     default:
       return false;
   }
@@ -10935,6 +11397,9 @@ bool install_intr_handler(int intr_num)
     case HC_INT4:
       s_installed_hc_int4_handler = true;
       break;
+    case HC_INT5:
+      s_installed_hc_int5_handler = true;
+      break;
     default:
       break;
   }
@@ -10975,6 +11440,13 @@ void remove_intr_handler(int intr_num)
       old_idt_entry = &old_hc_int4_idt_entry;
       old_stub = old_hc_int4_stub;
       break;
+    case HC_INT5:
+      if (!s_installed_hc_int5_handler) {
+        return;
+      }
+      old_idt_entry = &old_hc_int5_idt_entry;
+      old_stub = old_hc_int5_stub;
+      break;
     default:
       return;
   }
@@ -10996,6 +11468,9 @@ void remove_intr_handler(int intr_num)
       break;
     case HC_INT4:
       s_installed_hc_int4_handler = false;
+      break;
+    case HC_INT5:
+      s_installed_hc_int5_handler = false;
       break;
     default:
       break;
@@ -11033,6 +11508,9 @@ bool install_intr_handlers()
   if (!install_intr_handler(HC_INT4)) {
     return false;
   }
+  if (!install_intr_handler(HC_INT5)) {
+    return false;
+  }
 
   if (!macOS_Mojave()) {
     if (!hook_vm_page_validate_cs()) {
@@ -11065,6 +11543,7 @@ void remove_intr_handlers()
   remove_intr_handler(HC_INT2);
   remove_intr_handler(HC_INT3);
   remove_intr_handler(HC_INT4);
+  remove_intr_handler(HC_INT5);
   remove_stub_dispatcher();
 }
 
@@ -11085,6 +11564,12 @@ extern "C" void handle_user_hc_int3(x86_saved_state_t *intr_state)
 
 extern "C" void handle_user_hc_int4(x86_saved_state_t *intr_state)
 {
+  add_patch_hook(intr_state);
+}
+
+extern "C" void handle_user_hc_int5(x86_saved_state_t *intr_state)
+{
+  get_dynamic_caller(intr_state);
 }
 
 extern "C" void handle_kernel_hc_int1(x86_saved_state_t *intr_state)
@@ -11105,6 +11590,10 @@ extern "C" void handle_kernel_hc_int3(x86_saved_state_t *intr_state)
 extern "C" void handle_kernel_hc_int4(x86_saved_state_t *intr_state)
 {
   mac_file_check_mmap_hook(intr_state);
+}
+
+extern "C" void handle_kernel_hc_int5(x86_saved_state_t *intr_state)
+{
 }
 
 extern "C" kern_return_t HookCase_start(kmod_info_t * ki, void *d);
@@ -11151,6 +11640,7 @@ kern_return_t HookCase_start(kmod_info_t * ki, void *d)
     kprintf("HookCase: Unknown kernel type\n");
     return KERN_FAILURE;
   }
+  initialize_thread_offsets();
   initialize_use_invpcid();
   initialize_cpu_data_offsets();
   if (!install_intr_handlers()) {

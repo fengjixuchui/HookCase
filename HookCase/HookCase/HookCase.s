@@ -1,6 +1,6 @@
 /* The MIT License (MIT)
  *
- * Copyright (c) 2018 Steven Michaud
+ * Copyright (c) 2019 Steven Michaud
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -116,6 +116,7 @@
 #define SS_64                 15
 
 /* Offsets of cpu_data_fake_t fields in cpu_data_fake_t */
+#define CPU_ACTIVE_THREAD          8
 #define CPU_PREEMPTION_LEVEL       24
 #define CPU_NUMBER                 28
 #define CPU_INT_STATE              32
@@ -403,29 +404,20 @@ Entry(setup_continues)
    or      $(CR0_TS), %eax
    mov     %rax, %cr0
 
-/* As best I can tell we don't really need this. And it causes trouble on
-   recent minor releases of macOS 10.12 and 10.13. */
-/* push    %r15
-   mov     %rsp, %r15
-   and     $0xFFFFFFFFFFFFFFF0, %rsp
-   call    EXT(reset_iotier_override)
-   mov     %r15, %rsp
-   pop     %r15
-*/
+   mov     EXT(g_iotier_override_offset)(%rip), %rax
+   add     %gs:CPU_ACTIVE_THREAD, %rax
+   movl    $(-1), (%rax)
+
    /* R15 == x86_saved_state_t */
    /* RDX == trapfn */
    jmp     *%rdx
 
 /* R15 == x86_saved_state_t */
 Entry(teardown)
-/* As best I can tell we don't really need this. */
-/* push    %r15
-   mov     %rsp, %r15
-   and     $0xFFFFFFFFFFFFFFF0, %rsp
-   call    EXT(reset_iotier_override)
-   mov     %r15, %rsp
-   pop     %r15
-*/
+   mov     EXT(g_iotier_override_offset)(%rip), %rax
+   add     %gs:CPU_ACTIVE_THREAD, %rax
+   movl    $(-1), (%rax)
+
    /* Restore the floating point state */
 /* As best I can tell we don't really need this. */
 /* push    %r15
@@ -555,20 +547,24 @@ Entry(user_trampoline)
    cmpw    $(HC_INT1), %cx
    jne     1f
    lea     EXT(handle_user_hc_int1)(%rip), %rax
-   jmp     4f
+   jmp     5f
 1: cmpw    $(HC_INT2), %cx
    jne     2f
    lea     EXT(handle_user_hc_int2)(%rip), %rax
-   jmp     4f
+   jmp     5f
 2: cmpw    $(HC_INT3), %cx
    jne     3f
    lea     EXT(handle_user_hc_int3)(%rip), %rax
-   jmp     4f
+   jmp     5f
 3: cmpw    $(HC_INT4), %cx
-   jne     5f
+   jne     4f
    lea     EXT(handle_user_hc_int4)(%rip), %rax
+   jmp     5f
+4: cmpw    $(HC_INT5), %cx
+   jne     6f
+   lea     EXT(handle_user_hc_int5)(%rip), %rax
 
-4: mov     %r15, %rdi
+5: mov     %r15, %rdi
 
    push    %r15
    sti
@@ -579,7 +575,7 @@ Entry(user_trampoline)
    cli
    pop     %r15
 
-5: jmp     EXT(teardown)
+6: jmp     EXT(teardown)
 
 /* Calls one of our kernel interrupt handlers in HookCase.cpp.  Called with:
  *   R15 == x86_saved_state_t
@@ -589,20 +585,24 @@ Entry(kernel_trampoline)
    cmpw    $(HC_INT1), %cx
    jne     1f
    lea     EXT(handle_kernel_hc_int1)(%rip), %rax
-   jmp     4f
+   jmp     5f
 1: cmpw    $(HC_INT2), %cx
    jne     2f
    lea     EXT(handle_kernel_hc_int2)(%rip), %rax
-   jmp     4f
+   jmp     5f
 2: cmpw    $(HC_INT3), %cx
    jne     3f
    lea     EXT(handle_kernel_hc_int3)(%rip), %rax
-   jmp     4f
+   jmp     5f
 3: cmpw    $(HC_INT4), %cx
-   jne     5f
+   jne     4f
    lea     EXT(handle_kernel_hc_int4)(%rip), %rax
+   jmp     5f
+4: cmpw    $(HC_INT5), %cx
+   jne     6f
+   lea     EXT(handle_kernel_hc_int5)(%rip), %rax
 
-4: mov     %r15, %rdi
+5: mov     %r15, %rdi
 
    sti
    cld
@@ -614,7 +614,7 @@ Entry(kernel_trampoline)
    mov     %r15, %rsp
    pop     %r15
 
-5: jmp     EXT(kernel_teardown)
+6: jmp     EXT(kernel_teardown)
 
 /* Called with:
  *   R15 == x86_saved_state_t
@@ -663,6 +663,9 @@ Entry(hc_int3_raw_handler)
 
 Entry(hc_int4_raw_handler)
    SETUP(HC_INT4)
+
+Entry(hc_int5_raw_handler)
+   SETUP(HC_INT5)
 
 /* In developer and debug kernels, the OSCompareAndSwap...() all enforce a
  * requirement that 'address' be 4-byte aligned.  But this is actually only
@@ -790,7 +793,11 @@ Entry(stub_handler)
    jne     4f
    pop     %rax
    jmp     EXT(hc_int4_raw_handler)
-4: pop     %rax
+4: cmpq    $(HC_INT5), %rax
+   jne     5f
+   pop     %rax
+   jmp     EXT(hc_int5_raw_handler)
+5: pop     %rax
    iretq
 
 /* CALLER is for kernel methods we've breakpointed which have a standard C/C++

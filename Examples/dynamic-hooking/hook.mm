@@ -62,12 +62,6 @@ extern "C" {
 #include <libgen.h>
 #include <execinfo.h>
 
-#include <xpc/xpc.h>
-#include <dispatch/dispatch.h>
-#include <uuid/uuid.h>
-#include <sys/time.h>
-#include <unistd.h>
-
 pthread_t gMainThreadID = 0;
 
 bool IsMainThread()
@@ -306,10 +300,6 @@ static void LogWithFormatV(bool decorate, const char *format, va_list args)
   if (!strcmp("/dev/console", stdout_path) ||
       !strcmp("/dev/null", stdout_path))
   {
-    // No kind of logging works from diagnosticd, which I suppose makes sense
-    // as diagnosticd is a key component of the logging subsystem on macOS
-    // 10.12 and 10.13.  So all our logging must be done through a serial port.
-#if (0)
     if (CanUseCF()) {
       aslclient asl = asl_open(NULL, "com.apple.console", ASL_OPT_NO_REMOTE);
       aslmsg msg = asl_new(ASL_TYPE_MSG);
@@ -319,7 +309,6 @@ static void LogWithFormatV(bool decorate, const char *format, va_list args)
       asl_free(msg);
       asl_close(asl);
     } else {
-#endif
       if (!g_serial1_checked) {
         g_serial1_checked = true;
         g_serial1 =
@@ -331,9 +320,7 @@ static void LogWithFormatV(bool decorate, const char *format, va_list args)
       if (g_serial1_FILE) {
         fputs(finished, g_serial1_FILE);
       }
-#if (0)
     }
-#endif
   } else {
     fputs(finished, stdout);
   }
@@ -931,790 +918,101 @@ static int Hooked_interpose_example(char *arg1, int (*arg2)(char *))
 
 // Put other hooked methods and swizzled classes here
 
+typedef void (*CFMachPortCallBack)(CFMachPortRef port, void *msg,
+                                   CFIndex size, void *info);
+
+static void
+Hooked_CFMachPortCallBack(CFMachPortRef port, void *msg,
+                          CFIndex size, void *info)
+{
+  CFMachPortCallBack caller = (CFMachPortCallBack)
+    get_dynamic_caller(reinterpret_cast<void*>(Hooked_CFMachPortCallBack));
+  caller(port, msg, size, info);
+  LogWithFormat(true, "Hook.mm: CFMachPortCallBack(): port \'%p\', size \'%i\', info \'%p\'",
+                port, size, info);
+  // Not always required, but using it when not required does no harm.
+  reset_hook(reinterpret_cast<void*>(Hooked_CFMachPortCallBack));
+}
+
+#if (0)
+// _CFMachPortCreateWithPort2() is an undocumented method called by both
+// CFMachPortCreate() and CFMachPortCreateWithPort().  So setting a patch
+// hook on it will catch all calls to both of the documented methods.
+CFMachPortRef
+_CFMachPortCreateWithPort2(CFAllocatorRef allocator, mach_port_t portNum,
+                           CFMachPortCallBack callout, CFMachPortContext *context,
+                           Boolean *shouldFreeInfo, uint32_t arg6);
+#endif
+
+CFMachPortRef
+(*_CFMachPortCreateWithPort2_caller)(CFAllocatorRef allocator, mach_port_t portNum,
+                                     CFMachPortCallBack callout, CFMachPortContext *context,
+                                     Boolean *shouldFreeInfo, uint32_t arg6) = NULL;
+
+static CFMachPortRef
+Hooked__CFMachPortCreateWithPort2(CFAllocatorRef allocator, mach_port_t portNum,
+                                  CFMachPortCallBack callout, CFMachPortContext *context,
+                                  Boolean *shouldFreeInfo, uint32_t arg6)
+{
+  CFMachPortRef retval =
+    _CFMachPortCreateWithPort2_caller(allocator, portNum, callout, context,
+                                      shouldFreeInfo, arg6);
+  LogWithFormat(true, "Hook.mm: _CFMachPortCreateWithPort2(): callout \'%p\', returning \'%p\'",
+                callout, retval);
+  if (callout) {
+    add_patch_hook(reinterpret_cast<void*>(callout),
+                   reinterpret_cast<void*>(Hooked_CFMachPortCallBack));
+  }
+  // Not always required, but using it when not required does no harm.
+  reset_hook(reinterpret_cast<void*>(Hooked__CFMachPortCreateWithPort2));
+  return retval;
+}
+
+typedef void (*CFRunLoopObserverCallBack)(CFRunLoopObserverRef observer, CFRunLoopActivity activity,
+                                          void *info);
+CFRunLoopObserverRef
+CFRunLoopObserverCreate(CFAllocatorRef allocator, CFOptionFlags activities,
+                        Boolean repeats, CFIndex order, CFRunLoopObserverCallBack callout,
+                        CFRunLoopObserverContext *context);
+
+static void
+Hooked_CFRunLoopObserverCallBack(CFRunLoopObserverRef observer, CFRunLoopActivity activity,
+                                 void *info)
+{
+  CFRunLoopObserverCallBack caller = (CFRunLoopObserverCallBack)
+    get_dynamic_caller(reinterpret_cast<void*>(Hooked_CFRunLoopObserverCallBack));
+  caller(observer, activity, info);
+  LogWithFormat(true, "Hook.mm: CFRunLoopObserverCallBack(): observer \'%p\', activity \'0x%llx\', info \'%p\'",
+                observer, activity, info);
+  // Not always required, but using it when not required does no harm.
+  reset_hook(reinterpret_cast<void*>(Hooked_CFRunLoopObserverCallBack));
+}
+
+CFRunLoopObserverRef
+(*CFRunLoopObserverCreate_caller)(CFAllocatorRef allocator, CFOptionFlags activities,
+                                  Boolean repeats, CFIndex order, CFRunLoopObserverCallBack callout,
+                                  CFRunLoopObserverContext *context) = NULL;
+
+static CFRunLoopObserverRef
+Hooked_CFRunLoopObserverCreate(CFAllocatorRef allocator, CFOptionFlags activities,
+                               Boolean repeats, CFIndex order, CFRunLoopObserverCallBack callout,
+                               CFRunLoopObserverContext *context)
+{
+  CFRunLoopObserverRef retval =
+    CFRunLoopObserverCreate_caller(allocator, activities, repeats, order,
+                                   callout, context);
+  LogWithFormat(true, "Hook.mm: CFRunLoopObserverCreate(): activities \'0x%llx\', repeats \'%i\', order \'%lli\', callout \'%p\', returning \'%p\'",
+                activities, repeats, order, callout, retval);
+  if (callout) {
+    add_patch_hook(reinterpret_cast<void*>(callout),
+                   reinterpret_cast<void*>(Hooked_CFRunLoopObserverCallBack));
+  }
+  // Not always required, but using it when not required does no harm.
+  reset_hook(reinterpret_cast<void*>(Hooked_CFRunLoopObserverCreate));
+  return retval;
+}
+
 #pragma mark -
-
-// /usr/libexec/diagnosticd is a core component of the logging subsystem on
-// macOS 10.12, 10.13 and 10.14.  It listens (as com.apple.diagnosticd) for
-// connections from client apps like "log" and "Console".  While these client
-// connections are live, it receives messages from other parts of the OS,
-// which it passes along to its client(s).  These messages come from user-
-// level daemons (via their own connections to diagnosticd), and also from
-// /dev/oslog_stream, which diagnosticd monitors for messages from the kernel
-// (as long as it has at least one live connection to a client app).
-
-// add_new_kext(), remove_new_kext() and friends give us a way to keep track of
-// newly loaded and unloaded kexts, as information arrives from the kernel in
-// the form of metadata log messages.  See below near Hooked_read() for more
-// information.
-
-Boolean UUIDDataEqual(const void *value1, const void *value2)
-{
-  if (!value1 || !value2 ||
-     (CFGetTypeID((CFTypeRef) value1) != CFDataGetTypeID()) ||
-     (CFGetTypeID((CFTypeRef) value2) != CFDataGetTypeID()))
-  {
-    return false;
-  }
-
-  CFDataRef data1 = (CFDataRef) value1;
-  CFDataRef data2 = (CFDataRef) value2;
-
-  uint64_t *num1_ptr = (uint64_t *) CFDataGetBytePtr(data1);
-  uint64_t *num2_ptr = (uint64_t *) CFDataGetBytePtr(data2);
-
-  uint64_t num1_high = OSSwapInt64(num1_ptr[0]);
-  uint64_t num1_low = OSSwapInt64(num1_ptr[1]);
-  uint64_t num2_high = OSSwapInt64(num2_ptr[0]);
-  uint64_t num2_low = OSSwapInt64(num2_ptr[1]);
-
-  return ((num1_high == num2_high) && (num1_low == num2_low));
-}
-
-CFStringRef UUIDDataCopyDescription(const void *value)
-{
-  CFStringRef description = NULL;
-
-  if (!value || (CFGetTypeID((CFTypeRef) value) != CFDataGetTypeID())) {
-    description =
-      CFStringCreateWithFormat(kCFAllocatorDefault, NULL,
-                               CFSTR("Invalid UUID (%p)"), value);
-    return description;
-  }
-
-  CFDataRef data = (CFDataRef) value;
-  char uuid_string[PATH_MAX] = {0};
-  uuid_unparse(CFDataGetBytePtr(data), uuid_string);
-
-  description =
-    CFStringCreateWithCString(kCFAllocatorDefault, uuid_string,
-                              kCFStringEncodingUTF8);
-
-  return description;
-}
-
-static CFMutableArrayRef new_kexts = NULL;
-
-static void ensure_new_kexts()
-{
-  if (!new_kexts) {
-    CFArrayCallBacks our_callbacks = kCFTypeArrayCallBacks;
-    our_callbacks.copyDescription = UUIDDataCopyDescription;
-    our_callbacks.equal = UUIDDataEqual;
-    new_kexts = CFArrayCreateMutable(kCFAllocatorDefault, 0, &our_callbacks);
-  }
-}
-
-#define RANGE_ALL(a) CFRangeMake(0, CFArrayGetCount(a))
-
-static void add_new_kext(uuid_t kext_uuid)
-{
-  ensure_new_kexts();
-  CFDataRef item = CFDataCreate(kCFAllocatorDefault,
-                                (const UInt8 *) kext_uuid, sizeof(uuid_t));
-  if (!CFArrayContainsValue(new_kexts, RANGE_ALL(new_kexts), item)) {
-    CFArrayAppendValue(new_kexts, item);
-  }
-  CFRelease(item);
-}
-
-static void remove_new_kext(uuid_t kext_uuid)
-{
-  if (!new_kexts) {
-    return;
-  }
-  CFDataRef item = CFDataCreate(kCFAllocatorDefault,
-                                (const UInt8 *) kext_uuid, sizeof(uuid_t));
-  CFIndex offset =
-    CFArrayGetFirstIndexOfValue(new_kexts, RANGE_ALL(new_kexts), item);
-  if (offset != -1) {
-    CFArrayRemoveValueAtIndex(new_kexts, offset);
-  }
-  CFRelease(item);
-}
-
-static bool has_new_kext(uuid_t kext_uuid)
-{
-  if (!new_kexts) {
-    return false;
-  }
-
-  CFDataRef item = CFDataCreate(kCFAllocatorDefault,
-                                (const UInt8 *) kext_uuid, sizeof(uuid_t));
-  bool retval = CFArrayContainsValue(new_kexts, RANGE_ALL(new_kexts), item);
-  CFRelease(item);
-  return retval;
-}
-
-static bool has_new_kext_UTF8(char *kext_uuid)
-{
-  if (!new_kexts || !kext_uuid) {
-    return false;
-  }
-
-  uuid_t uuid = {0};
-  uuid_parse(kext_uuid, uuid);
-  return has_new_kext(uuid);
-}
-
-static bool has_new_kext_CFSTR(CFStringRef kext_uuid)
-{
-  if (!new_kexts || !kext_uuid) {
-    return false;
-  }
-  char uuid_cstring[PATH_MAX] = {0};
-  CFStringGetCString(kext_uuid, uuid_cstring, sizeof(uuid_cstring),
-                     kCFStringEncodingUTF8);
-  return has_new_kext_UTF8(uuid_cstring);
-}
-
-bool is_new_kexts_empty()
-{
-  return (!new_kexts || (CFArrayGetCount(new_kexts) == 0));
-}
-
-static void uuid_parse_path(char *uuid_string, uuid_t uuid)
-{
-  bzero(uuid, sizeof(uuid_t));
-  if (!uuid_string) {
-    return;
-  }
-
-  char uuid_string_part1[PATH_MAX] = {0};
-  char uuid_string_part2[PATH_MAX] = {0};
-
-  uuid_string_part1[0] = uuid_string[0];
-  uuid_string_part1[1] = uuid_string[1];
-  uuid_string += 2;
-  if (uuid_string[0] == '/') {
-    uuid_string += 1;
-  }
-  strncat(uuid_string_part1, uuid_string, 14);
-  uuid_string += 14;
-  strncpy(uuid_string_part2, uuid_string, 16);
-
-  uint64_t uuid_num_high = strtouq(uuid_string_part1, NULL, 16);
-  uint64_t uuid_num_low = strtouq(uuid_string_part2, NULL, 16);
-
-  uint64_t *uuid_ptr = (uint64_t *) uuid;
-  uuid_ptr[0] = OSSwapInt64(uuid_num_high);
-  uuid_ptr[1] = OSSwapInt64(uuid_num_low);
-}
-
-// diagnosticd calls _simple_asl_log() to log its activity.  This doesn't
-// work -- as best I can tell its output is simply lost.  But we can log these
-// calls ourselves by hooking _simple_asl_log().
-
-extern "C" void _simple_asl_log(int __level, const char *__facility, const char *__message);
-
-void Hooked__simple_asl_log(int __level, const char *__facility, const char *__message)
-{
-  _simple_asl_log(__level, __facility, __message);
-  LogWithFormat(true, "KernelLogging: _simple_asl_log(): __level \'%i\', __facility \"%s\", __message \"%s\"",
-                __level, __facility ? __facility : "null", __message ? __message : "null");
-}
-
-// Called by diagnosticd to open /dev/oslog_stream, on which it will listen
-// for messages from the kernel.
-static int Hooked_open(const char *path, int oflag, mode_t mode)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  int retval = 1;
-  if (oflag & O_CREAT) {
-    retval = open(path, oflag, mode);
-  } else {
-    retval = open(path, oflag);
-  }
-
-  if (is_diagnosticd) {
-    LogWithFormat(true, "KernelLogging: open(): path \"%s\", oflag \'0x%x\', returning \'%i\'",
-                  path, oflag, retval);
-  }
-
-  return retval;
-}
-
-char *get_data_as_string(const void *data, size_t length)
-{
-  if (!data || !length) {
-    return NULL;
-  }
-  size_t buffer_remaining = (3 * length);
-  char *retval = (char *) calloc(buffer_remaining + 1, 1);
-  if (!retval) {
-    return NULL;
-  }
-  for (int i = 0; i < length; ++i) {
-    const unsigned char item = ((const unsigned char *)data)[i];
-    char item_string[5] = {0};
-    snprintf(item_string, sizeof(item_string), "%02X:", item);
-    strncat(retval, item_string, buffer_remaining);
-    buffer_remaining -= strlen(item_string);
-  }
-  return retval;
-}
-
-// From the xnu kernel's libkern/firehose/firehose_types_private.h (begin)
-
-OS_ENUM(firehose_tracepoint_namespace, uint8_t,
-  firehose_tracepoint_namespace_activity        = 0x02,
-  firehose_tracepoint_namespace_trace           = 0x03,
-  firehose_tracepoint_namespace_log             = 0x04,
-  firehose_tracepoint_namespace_metadata        = 0x05,
-  firehose_tracepoint_namespace_signpost        = 0x06,
-);
-
-typedef uint8_t firehose_tracepoint_type_t;
-
-OS_ENUM(_firehose_tracepoint_type_metadata, firehose_tracepoint_type_t,
-  _firehose_tracepoint_type_metadata_dyld       = 0x01,
-  _firehose_tracepoint_type_metadata_subsystem  = 0x02,
-  _firehose_tracepoint_type_metadata_kext       = 0x03,
-);
-
-OS_ENUM(_firehose_tracepoint_type_log, firehose_tracepoint_type_t,
-  _firehose_tracepoint_type_log_default         = 0x00,
-  _firehose_tracepoint_type_log_info            = 0x01,
-  _firehose_tracepoint_type_log_debug           = 0x02,
-  _firehose_tracepoint_type_log_error           = 0x10,
-  _firehose_tracepoint_type_log_fault           = 0x11,
-);
-
-OS_ENUM(firehose_tracepoint_flags, uint16_t,
-  _firehose_tracepoint_flags_base_has_current_aid   = 0x0001,
-#define _firehose_tracepoint_flags_pc_style_mask    (0x0007 << 1)
-  _firehose_tracepoint_flags_pc_style_none          = 0x0000 << 1,
-  _firehose_tracepoint_flags_pc_style_main_exe      = 0x0001 << 1,
-  _firehose_tracepoint_flags_pc_style_shared_cache  = 0x0002 << 1,
-  _firehose_tracepoint_flags_pc_style_main_plugin   = 0x0003 << 1,
-  _firehose_tracepoint_flags_pc_style_absolute      = 0x0004 << 1,
-  _firehose_tracepoint_flags_pc_style_uuid_relative = 0x0005 << 1,
-  _firehose_tracepoint_flags_pc_style__unused6      = 0x0006 << 1,
-  _firehose_tracepoint_flags_pc_style__unused7      = 0x0007 << 1,
-  _firehose_tracepoint_flags_base_has_unique_pid    = 0x0010,
-);
-
-OS_ENUM(_firehose_tracepoint_flags_log, uint16_t,
-  _firehose_tracepoint_flags_log_has_private_data   = 0x0100,
-  _firehose_tracepoint_flags_log_has_subsystem      = 0x0200,
-  _firehose_tracepoint_flags_log_has_rules          = 0x0400,
-  _firehose_tracepoint_flags_log_has_oversize       = 0x0800,
-);
-
-// These values are only for firehose_tracepoint_namespace_metadata.  For
-// firehose_tracepoint_namespace_log, _code is the module offset of the log
-// message's format string (as determined by a call to _os_trace_offset()).
-OS_ENUM(firehose_tracepoint_code, uint32_t,
-  firehose_tracepoint_code_load                 = 0x01,
-  firehose_tracepoint_code_unload               = 0x02,
-);
-
-// From the xnu kernel's libkern/firehose/firehose_types_private.h (end)
-
-// From the xnu kernel's libkern/firehose/tracepoint_private.h (begin)
-
-typedef struct __attribute__((packed)) {
-  firehose_tracepoint_namespace_t _namespace;
-  firehose_tracepoint_type_t      _type;
-  firehose_tracepoint_flags_t     _flags;
-  uint32_t                        _code;
-} firehose_tracepoint_id_t;
-
-// This is the format of oslog_entry.data for
-// firehose_tracepoint_namespace_metadata
-typedef struct firehose_trace_uuid_info_s {
-  uuid_t ftui_uuid;      /* uuid of binary */
-  uint64_t ftui_address; /* load address of binary */
-  uint64_t ftui_size;    /* load size of binary */
-} *firehose_trace_uuid_info_t;
-
-// From the xnu kernel's libkern/firehose/tracepoint_private.h (end)
-
-// This is the format of oslog_entry.data for
-// firehose_tracepoint_namespace_log and
-// _firehose_tracepoint_flags_pc_style_main_exe.
-typedef struct firehose_trace_log_exe_data_s {
-  uint32_t caller_addr; // Offset from beginning of binary
-  uint8_t data[];
-} *firehose_trace_log_exe_data_t;
-
-// This is the format of oslog_entry.data for
-// firehose_tracepoint_namespace_log and
-// _firehose_tracepoint_flags_pc_style_absolute.
-typedef struct firehose_trace_log_other_data_s {
-#if __LP64__
-  // Absolute address (unslid), high word removed.  Can be sign-extended to
-  // the full 64-bits.  The offset in the current binary can be computed by
-  // subtracting firehose_trace_uuid_info_s.ftui_address.
-  uint16_t caller_addr[3];
-#else
-  uint32_t caller_addr;
-#endif
-  uint8_t data[];
-} *firehose_trace_log_other_data_t;
-
-typedef struct {
-  uint64_t timestamp;
-  firehose_tracepoint_id_t ftid;
-  uint64_t thread;
-  struct {
-    uint64_t timestamp_delta : 48;
-    uint64_t data_length : 16;
-  };
-  uint8_t data[];
-} oslog_entry;
-
-// read() is called from diagnosticd to read messages from the kernel (via
-// /dev/oslog_stream).  As best I can tell, these are either "metadata" or
-// "log" messages.  The "metadata" messages announce that a particular kext
-// has been loaded or unloaded.
-static ssize_t Hooked_read(int fildes, void *buf, size_t nbyte)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  ssize_t retval = read(fildes, buf, nbyte);
-  if (is_diagnosticd && nbyte && (retval > 0)) {
-    char *data_string = get_data_as_string(buf, retval > 512 ? 512 : retval);
-    if (data_string) {
-      oslog_entry *entry = (oslog_entry *) buf;
-      LogWithFormat(true, "KernelLogging: read(1): entry->ftid._namespace \'0x%x\', entry->ftid._type \'0x%x\', entry->ftid._flags \'0x%x\', entry->ftid._code \'0x%x\'",
-                    entry->ftid._namespace, entry->ftid._type, entry->ftid._flags, entry->ftid._code);
-      if ((entry->ftid._namespace == firehose_tracepoint_namespace_metadata) &&
-          (entry->ftid._type == _firehose_tracepoint_type_metadata_kext))
-      {
-        firehose_trace_uuid_info_t uuid_info =
-          (firehose_trace_uuid_info_t) &entry->data;
-        uuid_t kext_uuid = {0};
-        uuid_copy(kext_uuid, uuid_info->ftui_uuid);
-        char uuid_string[PATH_MAX] = {0};
-        uuid_unparse(kext_uuid, uuid_string);
-        if (entry->ftid._code == firehose_tracepoint_code_load) {
-          LogWithFormat(true, "KernelLogging: read(2): Kext \"%s\" loaded at offset \'%p\' with size \'%u\'",
-                        uuid_string, uuid_info->ftui_address, uuid_info->ftui_size);
-          add_new_kext(kext_uuid);
-        } else if (entry->ftid._code == firehose_tracepoint_code_unload) {
-          LogWithFormat(true, "KernelLogging: read(2): Kext \"%s\" unloaded",
-                        uuid_string);
-          remove_new_kext(kext_uuid);
-        }
-      }
-      char fildes_path[PATH_MAX] = {0};
-      fcntl(fildes, F_GETPATH, fildes_path);
-      LogWithFormat(true, "KernelLogging: read(3): fildes \"%s(%i)\", nbyte \'%u\', retval \'%i\', buf \"%s\"",
-                    fildes_path, fildes, nbyte, retval, data_string);
-      free(data_string);
-    }
-  }
-
-  return retval;
-}
-
-// Sends a message to a client program -- for example "log" or "Console".
-// Noisy.  Sends everything, unfiltered.
-void Hooked_xpc_connection_send_message(xpc_connection_t connection, xpc_object_t message)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  char *message_desc = NULL;
-  if (message && is_diagnosticd) {
-    message_desc = xpc_copy_description(message);
-  }
-
-  xpc_connection_send_message(connection, message);
-
-  if (is_diagnosticd) {
-    pid_t peer_pid = -1;
-    uid_t peer_uid = -1;
-    if (connection) {
-      peer_pid = xpc_connection_get_pid(connection);
-      peer_uid = xpc_connection_get_euid(connection);
-    }
-    char peer_name[PATH_MAX] = {0};
-    if (peer_pid && (peer_pid != -1)) {
-      proc_name(peer_pid, peer_name, sizeof(peer_name));
-    } else {
-      strcpy(peer_name, "none");
-    }
-    if (!strcmp(peer_name, "Console") || !strcmp(peer_name, "log")) {
-      LogWithFormat(true, "Hook.mm: xpc_connection_send_message(): peer \"%s(%u)\", uid \'%i\', message %s",
-                    peer_name, peer_pid, peer_uid, message_desc ? message_desc : "null");
-    }
-  }
-
-  if (message_desc) {
-    free(message_desc);
-  }
-}
-
-extern "C" xpc_object_t _os_activity_stream_entry_encode(void *entry);
-
-// Encodes a log message before it gets sent via xpc_connection_send_message().
-xpc_object_t Hooked__os_activity_stream_entry_encode(void *entry)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  xpc_object_t retval = _os_activity_stream_entry_encode(entry);
-
-  if (is_diagnosticd) {
-    char *retval_desc = NULL;
-    if (retval) {
-      retval_desc = xpc_copy_description(retval);
-    }
-    LogWithFormat(true, "KernelLogging: _os_activity_stream_entry_encode(): returning %s",
-                  retval_desc ? retval_desc : "null");
-    if (retval_desc) {
-      free(retval_desc);
-    }
-  }
-
-  return retval;
-}
-
-extern "C" bool _chunk_support_convert_tracepoint(void *arg0, void **arg1, void **arg2);
-
-// Called just before _os_activity_stream_entry_encode(), which only gets
-// called if this method returns 'true'.
-bool Hooked__chunk_support_convert_tracepoint(void *arg0, void **arg1, void **arg2)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  bool retval = _chunk_support_convert_tracepoint(arg0, arg1, arg2);
-
-  if (is_diagnosticd) {
-    LogWithFormat(true, "KernelLogging: _chunk_support_convert_tracepoint(): arg0 \'%p\', arg1 \'%p\', arg2 \'%p\', returning \'%i\'",
-                  arg0, arg1 ? *arg1 : NULL, arg2 ? *arg2 : NULL, retval);
-  }
-
-  return retval;
-}
-
-#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101400
-bool (*uuidpath_resolve_fd_caller)(int fd, uuid_t uuid, uint32_t name_offset, uint32_t arg3,
-                                   char **name, char **arg5, char **imagepath, char **arg7) = NULL;
-
-// Resolves the information from a kernel log message (received via
-// read(/dev/oslog_stream)) into a "name" and "imagepath" for the outgoing
-// message to the "log" or "Console" app.  Used on Mojave and up.
-bool Hooked_uuidpath_resolve_fd(int fd, uuid_t uuid, uint32_t name_offset, uint32_t arg3,
-                                char **name, char **arg5, char **imagepath, char **arg7)
-{
-  bool retval = uuidpath_resolve_fd_caller(fd, uuid, name_offset, arg3, name, arg5, imagepath, arg7);
-
-  char fd_path[PATH_MAX] = {0};
-  fcntl(fd, F_GETPATH, fd_path);
-  char uuid_string[PATH_MAX] = {0};
-  uuid_unparse(uuid, uuid_string);
-  LogWithFormat(true, "KernelLogging: uuidpath_resolve_fd(): fd \'%i\' (path \"%s\"), uuid \"%s\", name_offset \'0x%x\', arg3 \'0x%x\', name \"%s\", arg5 \"%s\", imagepath \"%s\", arg7 \"%s\", returning \'%i\'",
-                fd, fd_path, uuid_string, name_offset, arg3, (name && *name) ? *name : "null",
-                (arg5 && *arg5) ? *arg5 : "null", (imagepath && *imagepath) ? *imagepath : "null",
-                (arg7 && *arg7) ? *arg7 : "null", retval);
-
-  return retval;
-}
-#else
-bool (*uuidpath_resolve_fd_caller)(int fd, uuid_t uuid, uint32_t name_offset,
-                                   char **name, char **imagepath, char **arg5) = NULL;
-
-// Resolves the information from a kernel log message (received via
-// read(/dev/oslog_stream)) into a "name" and "imagepath" for the outgoing
-// message to the "log" or "Console" app.  Used on Sierra and HighSierra.
-bool Hooked_uuidpath_resolve_fd(int fd, uuid_t uuid, uint32_t name_offset,
-                                char **name, char **imagepath, char **arg5)
-{
-  bool retval = uuidpath_resolve_fd_caller(fd, uuid, name_offset, name, imagepath, arg5);
-
-  char fd_path[PATH_MAX] = {0};
-  fcntl(fd, F_GETPATH, fd_path);
-  char uuid_string[PATH_MAX] = {0};
-  uuid_unparse(uuid, uuid_string);
-  LogWithFormat(true, "KernelLogging: uuidpath_resolve_fd(): fd \'%i\' (path \"%s\"), uuid \"%s\", name_offset \'0x%x\', name \"%s\", imagepath \"%s\", arg5 \'0x%x\', returning \'%i\'",
-                fd, fd_path, uuid_string, name_offset, (name && *name) ? *name : "null",
-                (imagepath && *imagepath) ? *imagepath : "null", arg5, retval);
-
-  return retval;
-}
-#endif
-
-extern "C" void *_os_trace_mmap_at(int fd, char *path, int oflag, uint64_t *length);
-
-// Maps the appropriate uuidtext file into memory.
-void *Hooked__os_trace_mmap_at(int fd, char *path, int oflag, uint64_t *length)
-{
-  bool is_LoggingSupport = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "LoggingSupport")) {
-    is_LoggingSupport = true;
-  }
-
-  void *retval = _os_trace_mmap_at(fd, path, oflag, length);
-
-  if (is_LoggingSupport) {
-    char fd_path[PATH_MAX] = {0};
-    fcntl(fd, F_GETPATH, fd_path);
-    LogWithFormat(true, "KernelLogging: _os_trace_mmap_at(): fd \'%i\' (path \"%s\"), path \"%s\", oflag \'0x%x\', length \'%llu\', returning \'%p\'",
-                  fd, fd_path, path ? path : "null", oflag, length ? *length : 0, retval);
-  }
-
-  return retval;
-}
-
-#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 101400
-
-uint32_t (*_os_trace_uuiddb_write_file_caller)(char *uuidtext_dir, uuid_t uuid, uint32_t arg2,
-                                               const struct iovec *iov, int iovcnt) = NULL;
-
-// Writes the appropriate uuidtext file.  Used on Sierra and HighSierra.
-uint32_t Hooked__os_trace_uuiddb_write_file(char *uuidtext_dir, uuid_t uuid, uint32_t arg2,
-                                            const struct iovec *iov, int iovcnt)
-{
-  char uuid_string[PATH_MAX] = {0};
-  uuid_unparse(uuid, uuid_string);
-
-  uint32_t retval =
-    _os_trace_uuiddb_write_file_caller(uuidtext_dir, uuid, arg2, iov, iovcnt);
-
-  LogWithFormat(true, "KernelLogging: _os_trace_uuiddb_write_file(): uuidtext_dir \"%s\", uuid \"%s\", arg2 \'%p\', returning \'%i\'",
-                uuidtext_dir ? uuidtext_dir : "null", uuid_string, arg2);
-
-  return retval;
-}
-
-extern "C" void _os_trace_uuiddb_harvest(uuid_t uuid, char *uuidtext_dir,
-                                         xpc_object_t dict, uint32_t arg3);
-
-// If need be, attempts to "harvest" information from a loaded kext and write
-// it to the appropriate uuidtext file.  This method is called on receipt (via
-// /dev/oslog_stream) of a metadata message announcing that a kext has just
-// been loaded.  Used on Sierra and HighSierra.
-void Hooked__os_trace_uuiddb_harvest(uuid_t uuid, char *uuidtext_dir,
-                                     xpc_object_t dict, uint32_t arg3)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  char uuid_string[PATH_MAX] = {0};
-  char *dict_desc = NULL;
-  if (is_diagnosticd) {
-    uuid_unparse(uuid, uuid_string);
-    if (dict) {
-      dict_desc = xpc_copy_description(dict);
-    }
-  }
-
-  _os_trace_uuiddb_harvest(uuid, uuidtext_dir, dict, arg3);
-
-  if (is_diagnosticd) {
-    LogWithFormat(true, "KernelLogging: _os_trace_uuiddb_harvest(): uuid \"%s\", uuidtext_dir \"%s\", arg3 \'0x%x\', dict %s",
-                  uuid_string, uuidtext_dir ? uuidtext_dir : "null", arg3, dict_desc ? dict_desc : "null");
-  }
-
-  if (dict_desc) {
-    free(dict_desc);
-  }
-}
-
-#endif
-
-CFDictionaryRef (*OSKextCopyLoadedKextInfoByUUID_caller)(CFArrayRef kextIdentifiers,
-                                                         CFArrayRef infoKeys) = NULL;
-
-// Called (indirectly) from _os_trace_uuiddb_harvest() to get information from
-// appropriate kext (if it's still loaded).  Used on Sierra and HighSierra.
-CFDictionaryRef Hooked_OSKextCopyLoadedKextInfoByUUID(CFArrayRef kextIdentifiers,
-                                                      CFArrayRef infoKeys)
-{
-  bool is_LoggingSupport = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "LoggingSupport")) {
-    is_LoggingSupport = true;
-  }
-
-  CFDictionaryRef retval =
-    OSKextCopyLoadedKextInfoByUUID_caller(kextIdentifiers, infoKeys);
-
-  if (is_LoggingSupport) {
-    bool is_checking_new_kext = false;
-    if (kextIdentifiers) {
-      if (CFArrayGetCount(kextIdentifiers) == 1) {
-        CFStringRef by_uuid = (CFStringRef)
-          CFArrayGetValueAtIndex(kextIdentifiers, 0);
-        is_checking_new_kext = has_new_kext_CFSTR(by_uuid);
-      }
-    }
-    if (is_checking_new_kext) {
-      LogWithFormat(true, "KernelLogging: OSKextCopyLoadedKextInfoByUUID(): kextIdentifiers %@, infoKeys %@, returning %@",
-                    kextIdentifiers, infoKeys, retval);
-    }
-  }
-
-  return retval;
-}
-
-// Called (indirectly) from _os_trace_uuiddb_harvest() to see if the
-// appropriate uuidtext file exists and is writeable.  Used on Sierra and
-// HighSierra.
-int Hooked_utimes(const char *path, const struct timeval times[2])
-{
-  bool is_LoggingSupport = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "LoggingSupport")) {
-    is_LoggingSupport = true;
-  }
-
-  int retval = utimes(path, times);
-
-  if (is_LoggingSupport && path) {
-    bool is_checking_new_kext = false;
-    char *uuid_in_path = (char *) strstr(path, "uuidtext/");
-    if (uuid_in_path) {
-      uuid_in_path += strlen("uuidtext/");
-      uuid_t uuid = {0};
-      uuid_parse_path(uuid_in_path, uuid);
-      is_checking_new_kext = has_new_kext(uuid);
-    }
-    if (is_checking_new_kext) {
-      char times_string[PATH_MAX] = {0};
-      if (!times) {
-        strcpy(times_string, "\"null\"");
-      } else {
-        sprintf(times_string, "access(tv_sec \'%lu\', tv_usec \'%u\'), modification(tv_sec \'%lu\', tv_usec \'%u\')",
-                times[0].tv_sec, times[0].tv_usec, times[1].tv_sec, times[1].tv_usec);
-      }
-      LogWithFormat(true, "KernelLogging: utimes(): path \"%s\", time %s, returning \'%i\'",
-                    path, times_string, retval);
-    }
-  }
-
-  return retval;
-}
-
-// The general format for block literals is documented in libclosure's
-// BlockImplementation.txt.
-typedef struct _block_literal {
-  void *isa;
-  int flags;
-  int reserved;
-  void (*invoke)(struct _block_literal *, ...);
-  void *descriptor;
-} block_literal, *block_literal_t;
-
-void (*___os_trace_uuiddb_harvest_impl_block_invoke)(block_literal_t, ...) = NULL;
-
-// Called (indirectly) from _os_trace_uuiddb_harvest() to dispatch a block to
-// do the actual work of "harvesting".  This hook can be used to show that a
-// kext whose start() function fails will already have been unloaded by the
-// time the metadata message appears (in /dev/oslog_stream) which announces
-// that it's been loaded.  Used on Sierra and HighSierra.
-void Hooked_dispatch_async(dispatch_queue_t queue, void (^block)(void))
-{
-  bool is_LoggingSupport = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "LoggingSupport")) {
-    is_LoggingSupport = true;
-  }
-
-  if (!___os_trace_uuiddb_harvest_impl_block_invoke) {
-    ___os_trace_uuiddb_harvest_impl_block_invoke =
-      (void (*)(struct _block_literal *, ...))
-      module_dlsym("/System/Library/PrivateFrameworks/LoggingSupport.framework/LoggingSupport",
-                   "____os_trace_uuiddb_harvest_impl_block_invoke");
-  }
-
-  if (is_LoggingSupport && !is_new_kexts_empty()) {
-    bool is_dispatching_uuiddb_harvest_block = false;
-    block_literal_t block_literal = (block_literal_t) block;
-    if (block_literal &&
-       (block_literal->invoke == *___os_trace_uuiddb_harvest_impl_block_invoke))
-    {
-      is_dispatching_uuiddb_harvest_block = true;
-    }
-    if (is_dispatching_uuiddb_harvest_block) {
-      LogWithFormat(true, "KernelLogging: dispatch_async(): Using dispatch_sync() instead");
-      // If a kext's start message failed, "harvesting" won't work even if
-      // 'block' is dispatched synchronously.
-      dispatch_sync(queue, block);
-      return;
-    }
-  }
-
-  dispatch_async(queue, block);
-}
-
-// Sends a request to logd to "harvest" information from a loaded kext and
-// write it to the appropriate uuidtext file.  This method is called on
-// receipt (via /dev/oslog_stream) of a metadata message announcing that a
-// kext has just been loaded.  Used on Mojave and up.
-xpc_object_t Hooked_xpc_connection_send_message_with_reply_sync(xpc_connection_t connection,
-                                                                xpc_object_t message)
-{
-  bool is_diagnosticd = false;
-  const char *owner_name = GetCallerOwnerName();
-  if (!strcmp(owner_name, "diagnosticd")) {
-    is_diagnosticd = true;
-  }
-
-  char *message_desc = NULL;
-  if (message && is_diagnosticd) {
-    message_desc = xpc_copy_description(message);
-  }
-
-  xpc_object_t retval = xpc_connection_send_message_with_reply_sync(connection, message);
-
-  char *reply_desc = NULL;
-  if (retval && is_diagnosticd) {
-    reply_desc = xpc_copy_description(retval);
-  }
-
-  if (is_diagnosticd) {
-    pid_t peer_pid = -1;
-    uid_t peer_uid = -1;
-    if (connection) {
-      peer_pid = xpc_connection_get_pid(connection);
-      peer_uid = xpc_connection_get_euid(connection);
-    }
-    char peer_name[PATH_MAX] = {0};
-    if (peer_pid && (peer_pid != -1)) {
-      proc_name(peer_pid, peer_name, sizeof(peer_name));
-    } else {
-      strcpy(peer_name, "none");
-    }
-    LogWithFormat(true, "Hook.mm: xpc_connection_send_message_with_reply_sync(): peer \"%s(%u)\", uid \'%i\', message %s, reply %s",
-                  peer_name, peer_pid, peer_uid, message_desc ? message_desc : "null",
-                  reply_desc ? reply_desc : "null");
-  }
-
-  if (message_desc) {
-    free(message_desc);
-  }
-  if (reply_desc) {
-    free(reply_desc);
-  }
-
-  return retval;
-}
 
 typedef struct _hook_desc {
   const void *hook_function;
@@ -1722,7 +1020,7 @@ typedef struct _hook_desc {
     // For interpose hooks
     const void *orig_function;
     // For patch hooks
-    const void *caller_func_ptr;
+    const void *func_caller_ptr;
   };
   const char *orig_function_name;
   const char *orig_module_name;
@@ -1746,23 +1044,8 @@ __attribute__((used)) static const hook_desc user_hooks[]
   INTERPOSE_FUNCTION(NSPushAutoreleasePool),
   PATCH_FUNCTION(__CFInitialize, /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation),
 
-  INTERPOSE_FUNCTION(_simple_asl_log),
-  INTERPOSE_FUNCTION(open),
-  INTERPOSE_FUNCTION(read),
-  //INTERPOSE_FUNCTION(xpc_connection_send_message),
-  INTERPOSE_FUNCTION(_os_activity_stream_entry_encode),
-  INTERPOSE_FUNCTION(_chunk_support_convert_tracepoint),
-  PATCH_FUNCTION(uuidpath_resolve_fd, /System/Library/PrivateFrameworks/LoggingSupport.framework/LoggingSupport),
-  INTERPOSE_FUNCTION(_os_trace_mmap_at),
-#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 101400
-  PATCH_FUNCTION(_os_trace_uuiddb_write_file, /System/Library/PrivateFrameworks/LoggingSupport.framework/LoggingSupport),
-  INTERPOSE_FUNCTION(_os_trace_uuiddb_harvest),
-  PATCH_FUNCTION(OSKextCopyLoadedKextInfoByUUID, /System/Library/Frameworks/IOKit.framework/IOKit),
-  INTERPOSE_FUNCTION(utimes),
-  INTERPOSE_FUNCTION(dispatch_async),
-#else
-  INTERPOSE_FUNCTION(xpc_connection_send_message_with_reply_sync),
-#endif
+  PATCH_FUNCTION(_CFMachPortCreateWithPort2, /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation),
+  //PATCH_FUNCTION(CFRunLoopObserverCreate, /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation),
 };
 
 // What follows are declarations of the CoreSymbolication APIs that we use to
@@ -2001,10 +1284,9 @@ void PrintAddress(void *address, CSTypeRef symbolicator)
     }
   }
 
-  if (!CSIsNull(owner)) {
-    ownerName = GetOwnerName(address, owner);
-    addressString = GetAddressString(address, owner);
-  }
+  ownerName = GetOwnerName(address, owner);
+  addressString = GetAddressString(address, owner);
+
   LogWithFormat(false, "    (%s) %s", ownerName, addressString);
 
   if (symbolicatorNeedsRelease) {
