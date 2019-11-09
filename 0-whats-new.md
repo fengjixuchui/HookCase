@@ -1,3 +1,14 @@
+# What's New in Version 4.0.1
+
+This version of HookCase documents how to use `sudo mount -uw /` to
+temporarily make system files and directories writable on macOS
+Catalina (10.15). It also updates
+[one of the examples](Examples/secinit/) for Catalina.
+
+# What's New in Version 4.0
+
+HookCase now supports macOS Catalina (10.15).
+
 # What's New in Version 3.3.1
 
 This version of HookCase tightens up the code that supports
@@ -15,7 +26,7 @@ HookCase now supports dynamically adding patch hooks for raw function
 pointers. This is useful in hooks for methods that use callbacks --
 for example CFMachPortCreate() and CFRunLoopObserverCreate(). For more
 information see
-[dynamic_patch_example() in the hook library template](HookLibraryTemplate/hook.mm#L828)
+[dynamic_patch_example() in the hook library template](HookLibraryTemplate/hook.mm#L834)
 and [the dynamic patch hooks example](examples-dynamic-hooking.md).
 
 # What's New in Version 3.2.1
@@ -67,7 +78,7 @@ HookCase now supports macOS Mojave (10.14).
 
 But Mojave's Debug kernel is currently very flaky -- lots of panics,
 with and without HookCase.  So support for the Debug kernel
-[has been disabled](HookCase/HookCase/HookCase.cpp#L364), at least
+[has been disabled](HookCase/HookCase/HookCase.cpp#L365), at least
 temporarily.
 
 # What's New in Version 2.1
@@ -95,16 +106,16 @@ instead of `int 0x22`, as follows:
 at a particular address in a given module.  This means that HookCase
 can now hook methods that aren't in their module's symbol table.  For
 more information see
-[Hooked_sub_123abc() in the hook library template](HookLibraryTemplate/hook.mm#L867).
+[Hooked_sub_123abc() in the hook library template](HookLibraryTemplate/hook.mm#L873).
 
-* Version 2.0 [fixes a bug](HookCase/HookCase/HookCase.cpp#L8871) that
+* Version 2.0 [fixes a bug](HookCase/HookCase/HookCase.cpp#L8559) that
 prevented interpose hooks from working outside the shared cache of
 system modules.
 
 * Version 2.0
-[fixes a previously undiscovered edge case](HookCase/HookCase/HookCase.cpp#L10371)
+[fixes a previously undiscovered edge case](HookCase/HookCase/HookCase.cpp#L9945)
 of an Apple kernel panic bug that was partially fixed in version 1.
 
 * Version 2.0
-[fixes a premature-release bug](Examples/events/hook.mm#L1333)
+[fixes a premature-release bug](Examples/events/hook.mm#L1339)
 in the "System Events" example's hook library.

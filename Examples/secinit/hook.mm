@@ -108,6 +108,7 @@ bool CanUseCF()
 #define MAC_OS_X_VERSION_10_12_HEX 0x00000AC0
 #define MAC_OS_X_VERSION_10_13_HEX 0x00000AD0
 #define MAC_OS_X_VERSION_10_14_HEX 0x00000AE0
+#define MAC_OS_X_VERSION_10_15_HEX 0x00000AF0
 
 char gOSVersionString[PATH_MAX] = {0};
 
@@ -186,6 +187,11 @@ bool macOS_HighSierra()
 bool macOS_Mojave()
 {
   return ((OSX_Version() & 0xFFF0) == MAC_OS_X_VERSION_10_14_HEX);
+}
+
+bool macOS_Catalina()
+{
+  return ((OSX_Version() & 0xFFF0) == MAC_OS_X_VERSION_10_15_HEX);
 }
 
 class nsAutoreleasePool {
@@ -949,15 +955,22 @@ char *get_data_as_string(const void *data, size_t length)
 // returns NULL, or if the entitlements it returns don't turn on the app
 // sandbox.  But otherwise the app sends its entitlements to secinitd to get
 // them compiled (for which see below), and uses the results to start up the
-// app sandbox.
+// app sandbox.  (On Catalina the method called is
+// xpc_copy_entitlements_for_self().)
 
 extern "C" xpc_object_t xpc_create_from_plist(const void *ptr, size_t len);
 
 extern "C" xpc_object_t xpc_copy_entitlements_for_pid(pid_t pid);
 
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101500
+xpc_object_t (*xpc_copy_entitlements_for_self_caller)() = NULL;
+
+static xpc_object_t Hooked_xpc_copy_entitlements_for_self()
+#else
 xpc_object_t (*xpc_copy_entitlements_for_pid_caller)(pid_t pid) = NULL;
 
 static xpc_object_t Hooked_xpc_copy_entitlements_for_pid(pid_t pid)
+#endif
 {
   bool is_libsecinit = false;
   const char *owner_name = GetCallerOwnerName();
@@ -965,8 +978,20 @@ static xpc_object_t Hooked_xpc_copy_entitlements_for_pid(pid_t pid)
     is_libsecinit = true;
   }
 
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101500
+  xpc_object_t retval = xpc_copy_entitlements_for_self_caller();
+#else
   xpc_object_t retval = xpc_copy_entitlements_for_pid_caller(pid);
+#endif
   if (is_libsecinit) {
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101500
+    char *retval_desc = NULL;
+    if (retval) {
+      retval_desc = xpc_copy_description((xpc_object_t) retval);
+    }
+    LogWithFormat(true, "secinit: xpc_copy_entitlements_for_self(): returning %s (0x%lx)",
+                  retval_desc ? retval_desc : "null", retval);
+#else
     char *retval_desc = NULL;
     if (retval) {
       size_t length = xpc_data_get_length(retval);
@@ -975,6 +1000,7 @@ static xpc_object_t Hooked_xpc_copy_entitlements_for_pid(pid_t pid)
     }
     LogWithFormat(true, "secinit: xpc_copy_entitlements_for_pid(): pid \'%u\', returning %s",
                   pid, retval_desc ? retval_desc : "null");
+#endif
     if (retval_desc) {
       free(retval_desc);
     }
@@ -1091,7 +1117,11 @@ __attribute__((used)) static const hook_desc user_hooks[]
   INTERPOSE_FUNCTION(NSPushAutoreleasePool),
   PATCH_FUNCTION(__CFInitialize, /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation),
 
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101500
+  PATCH_FUNCTION(xpc_copy_entitlements_for_self, /usr/lib/system/libxpc.dylib),
+#else
   PATCH_FUNCTION(xpc_copy_entitlements_for_pid, /usr/lib/system/libxpc.dylib),
+#endif
   PATCH_FUNCTION(xpc_pipe_routine, /usr/lib/system/libxpc.dylib),
   PATCH_FUNCTION(__mac_syscall, /usr/lib/system/libsystem_kernel.dylib),
 };

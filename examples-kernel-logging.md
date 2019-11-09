@@ -2,6 +2,13 @@
 
 ## The Bug
 
+As mentioned earlier, this example won't work unless you disable
+system integrity protection (SIP) altogether (`csrutil disable`), or
+at least disable "filesystem protection" (`csrutil enable --without
+kext --without fs`).  On macOS 10.15 (Catalina) you also need to
+remount the partition that contains system files with read-write
+permissions (`sudo mount -uw /`).
+
 Apple implemented a new logging subsystem on macOS Sierra (10.12) and
 up.  It's controlled by the `/usr/libexec/diagnosticd daemon`, which
 gets launched on demand at the behest of log message clients like the
@@ -16,7 +23,7 @@ kernel extensions whose `start()` method fails.
 
 Note that there's a workaround, which involves installing a serial
 port and using `kprintf()` to write to it.  For more information see
-[HookCase_start()](HookCase/HookCase/HookCase.cpp#L11602).
+[HookCase_start()](HookCase/HookCase/HookCase.cpp#L11228).
 
 The root of the problem is that the messages received by Apple's new
 logging subsystem no longer contain full strings.  Instead each
@@ -98,7 +105,7 @@ load a hook library.  Furthermore, logging doesn't work at all from
 `diagnosticd` (possibly because it controls the logging subsystem).
 So `diagnosticd-hook.dylib` writes all its output to a serial port.
 This is easiest to set up in a virtual machine.  For more information
-see [diagnosticd-hook.mm](Examples/kernel-logging/diagnosticd-hook.mm#L309).
+see [diagnosticd-hook.mm](Examples/kernel-logging/diagnosticd-hook.mm#L315).
 Note that user-mode code and the kernel can't both access the serial
 port at the same time.
 
@@ -155,3 +162,7 @@ following in `/System/Library/LaunchDaemons` to unload
         sudo launchctl unload /System/Library/LaunchDaemons/com.apple.diagnosticd.plist
         sudo launchctl load /System/Library/LaunchDaemons/com.apple.diagnosticd.plist
 
+You should probably also restore system integrity protection (`csrutil
+enable --without kext`).  On Catalina, the partition that contains
+system files will automatically be remounted read-only after your
+computer is rebooted.
