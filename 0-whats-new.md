@@ -1,3 +1,45 @@
+# What's New in Version 4.1
+
+This version of HookCase supports watchpoints. You can now set a
+watchpoint on a location in memory and gather information (including a
+stack trace) about the code that writes to that location.  For more
+information see
+[config_watcher() in the hook library template](HookLibraryTemplate/hook.mm#L793),
+[Hooked_watcher_example() in the hook library template](HookLibraryTemplate/hook.mm#L929)
+and [the watchpoints example](examples-watchpoints.md).
+
+# What's New in Version 4.0.5
+
+This version of HookCase fixes a bug which caused some patch hooks not
+to work properly. If the original function didn't have a standard
+prologue, the hook's call to `reset_hook()` would fail and the hook
+would only be called once. For more information see
+[Issue #17](https://github.com/steven-michaud/HookCase/issues/17)
+
+# What's New in Version 4.0.4
+
+My version 4.0.3 patch didn't fix that kernel panic, either (the one
+in `vn_authorize_open_existing()`). Now I really think I've found the
+problem -- one that dates back to the earliest HookCase release. It's
+only by chance that it didn't become visible earlier. I've done a week
+of hard testing without seeing any more kernel panics. For more
+information see
+[Really really fix kernel panic reported at issue #14](https://github.com/steven-michaud/HookCase/commit/8cf8a444aacea7c1cd752f09407224458cf190b6)
+and
+[Issue #14](https://github.com/steven-michaud/HookCase/issues/14).
+
+# What's New in Version 4.0.3
+
+It turns out my version 4.0.2 patch didn't fix one of the kernel
+panics it was supposed to. This version's patch really does fix it, as
+best I can tell after several days of testing. See
+[Issue #14](https://github.com/steven-michaud/HookCase/issues/14).
+
+# What's New in Version 4.0.2
+
+This version of HookCase fixes two intermittent kernel panics. For
+more information see [Issue #14](https://github.com/steven-michaud/HookCase/issues/14).
+
 # What's New in Version 4.0.1
 
 This version of HookCase documents how to use `sudo mount -uw /` to
@@ -26,7 +68,7 @@ HookCase now supports dynamically adding patch hooks for raw function
 pointers. This is useful in hooks for methods that use callbacks --
 for example CFMachPortCreate() and CFRunLoopObserverCreate(). For more
 information see
-[dynamic_patch_example() in the hook library template](HookLibraryTemplate/hook.mm#L834)
+[dynamic_patch_example() in the hook library template](HookLibraryTemplate/hook.mm#L873)
 and [the dynamic patch hooks example](examples-dynamic-hooking.md).
 
 # What's New in Version 3.2.1
@@ -78,7 +120,7 @@ HookCase now supports macOS Mojave (10.14).
 
 But Mojave's Debug kernel is currently very flaky -- lots of panics,
 with and without HookCase.  So support for the Debug kernel
-[has been disabled](HookCase/HookCase/HookCase.cpp#L365), at least
+[has been disabled](HookCase/HookCase/HookCase.cpp#L371), at least
 temporarily.
 
 # What's New in Version 2.1
@@ -106,16 +148,16 @@ instead of `int 0x22`, as follows:
 at a particular address in a given module.  This means that HookCase
 can now hook methods that aren't in their module's symbol table.  For
 more information see
-[Hooked_sub_123abc() in the hook library template](HookLibraryTemplate/hook.mm#L873).
+[Hooked_sub_123abc() in the hook library template](HookLibraryTemplate/hook.mm#L912).
 
-* Version 2.0 [fixes a bug](HookCase/HookCase/HookCase.cpp#L8559) that
+* Version 2.0 [fixes a bug](HookCase/HookCase/HookCase.cpp#L9349) that
 prevented interpose hooks from working outside the shared cache of
 system modules.
 
 * Version 2.0
-[fixes a previously undiscovered edge case](HookCase/HookCase/HookCase.cpp#L9945)
+[fixes a previously undiscovered edge case](HookCase/HookCase/HookCase.cpp#L10830)
 of an Apple kernel panic bug that was partially fixed in version 1.
 
 * Version 2.0
-[fixes a premature-release bug](Examples/events/hook.mm#L1339)
+[fixes a premature-release bug](Examples/events/hook.mm#L1335)
 in the "System Events" example's hook library.

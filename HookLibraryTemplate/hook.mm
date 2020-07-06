@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2019 Steven Michaud
+// Copyright (c) 2020 Steven Michaud
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -69,15 +69,12 @@ bool IsMainThread()
   return (!gMainThreadID || (gMainThreadID == pthread_self()));
 }
 
-void CreateGlobalSymbolicator();
-
 bool sGlobalInitDone = false;
 
 void basic_init()
 {
   if (!sGlobalInitDone) {
     gMainThreadID = pthread_self();
-    CreateGlobalSymbolicator();
     sGlobalInitDone = true;
   }
 }
@@ -213,9 +210,13 @@ typedef struct _CSTypeRef {
 
 static CSTypeRef initializer = {0};
 
+#define STACK_MAX 256
+typedef uint64_t callstack_t[STACK_MAX];
+
 const char *GetOwnerName(void *address, CSTypeRef owner = initializer);
 const char *GetAddressString(void *address, CSTypeRef owner = initializer);
 void PrintAddress(void *address, CSTypeRef symbolicator = initializer);
+void PrintCallstack(callstack_t callstack);
 void PrintStackTrace();
 BOOL SwizzleMethods(Class aClass, SEL orgMethod, SEL posedMethod, BOOL classMethods);
 
@@ -773,6 +774,44 @@ void *get_dynamic_caller(void *hook)
   return retval;
 }
 
+// Information collected by user_trap_hook() in HookCase.kext when a
+// watchpoint is hit, then passed back to user mode when config_watcher() is
+// called to unset the watchpoint (with 'set' == false).
+typedef struct _watcher_info {
+  // Stack trace of the code running when the watchpoint is hit.
+  callstack_t callstack;
+  // Exact address hit (inside the watchpoint's address range).
+  uint64_t hit;
+  // User-land equivalent of the thread (kernel-mode thread_t object) running
+  // when the watchpoint is hit. Use pthread_from_mach_thread_np() to convert
+  // it to a pthread object.
+  uint32_t mach_thread;
+  // Needed to make structure size the same in 64bit and 32bit modes.
+  uint32_t pad;
+} watcher_info_t;
+
+// (Re)set or unset a watchpoint on a range of memory. A watchpoint is "hit"
+// whenever something tries to write anywhere in its address range. When this
+// happens, information on it is collected in a watcher_info_t structure. This
+// includes a stack trace of the code running when the watchpoint was hit.
+// This information is passed back to user-land when config_watcher() is
+// called to unset the watchpoint (with 'set' == false). Watchpoints are
+// implemented by (temporarily) changing memory access permissions to prevent
+// writes. Writing to a watchpoint triggers a fault, which ends up being
+// processed in HookCase.kext's user_trap_hook(). user_trap_hook() restores
+// the original access permissions, records the requisite information, and
+// saves it to a watcher_info_t structure. Memory access permissions are for
+// a "page" of memory (usually 4096 bytes long). So calling config_watcher()
+// to set a "watchpoint" on a particular memory address actually ends up
+// setting a "watch range" on a particular page (block) of memory.
+bool config_watcher(void *watchpoint, watcher_info_t *info, bool set)
+{
+  bool retval;
+  __asm__ volatile("int %0" :: "N" (0x35));
+  __asm__ volatile("movb %%al, %0" : "=r" (retval));
+  return retval;
+}
+
 class loadHandler
 {
 public:
@@ -884,6 +923,50 @@ static int Hooked_sub_123abc(char *arg)
   PrintStackTrace();
   // Not always required, but using it when not required does no harm.
   reset_hook(reinterpret_cast<void*>(Hooked_sub_123abc));
+  return retval;
+}
+
+// An example of setting a watchpoint at a particular memory address (actually
+// an address range), then unsetting it to collect information on whatever
+// code (if any) triggered the watchpoint (by writing to its address range).
+// Watchpoints are hit at most once between each pair of calls to
+// config_watcher(true) and config_watcher(false). If a watchpoint has been
+// triggered, it is already unset by the time config_watcher(false) is called
+// (and we collect information on it). To find the next hit one must hook the
+// method that triggered the first one, then set another watchpoint inside its
+// hook. This example is quite trivial -- it sets a watchpoint and also
+// triggers it. A more useful one would set a watchpoint to find out what
+// other code can trigger it.
+watcher_info_t s_watcher_info = {0};
+
+int (*watcher_example_caller)(char *arg) = NULL;
+
+static int Hooked_watcher_example(char *arg)
+{
+  int retval = watcher_example_caller(arg);
+  unsigned char *pages = (unsigned char *) valloc(PAGE_SIZE);
+  if (pages) {
+    bzero(pages, PAGE_SIZE);
+    void *watchpoint = pages;
+    if (config_watcher(watchpoint, &s_watcher_info, true)) {
+      pages[0] = 1;
+      config_watcher(watchpoint, &s_watcher_info, false);
+      if (s_watcher_info.hit) {
+        pthread_t thread =
+          pthread_from_mach_thread_np(s_watcher_info.mach_thread);
+        char thread_name[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        if (thread) {
+          pthread_getname_np(thread, thread_name, sizeof(thread_name) - 1);
+        }
+        LogWithFormat(true, "Hook.mm: watcher_example(): arg \"%s\", returning \'%i\', pages[0] \'0x%x\', watchpoint \'%p\', hit \'0x%llx\', thread %s[%p], mach_thread \'0x%x\'\n",
+                      arg, retval, pages[0], watchpoint, s_watcher_info.hit, thread_name, thread, s_watcher_info.mach_thread);
+        PrintCallstack(s_watcher_info.callstack);
+      }
+    }
+    free(pages);
+  }
+  // Not always required, but using it when not required does no harm.
+  reset_hook(reinterpret_cast<void*>(Hooked_watcher_example));
   return retval;
 }
 
@@ -1203,7 +1286,33 @@ void PrintAddress(void *address, CSTypeRef symbolicator)
   }
 }
 
-#define STACK_MAX 256
+void PrintCallstack(callstack_t callstack)
+{
+  if (!CanUseCF()) {
+    return;
+  }
+
+  CreateGlobalSymbolicator();
+
+  CSSymbolicatorRef symbolicator = {0};
+  bool symbolicatorNeedsRelease = GetSymbolicator(&symbolicator);
+  if (CSIsNull(symbolicator)) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < STACK_MAX; ++i) {
+    uint64_t item = callstack[i];
+    if (!item) {
+      break;
+    }
+    void *address = (void *) item;
+    PrintAddress(address, symbolicator);
+  }
+
+  if (symbolicatorNeedsRelease) {
+    CSRelease(symbolicator);
+  }
+}
 
 void PrintStackTrace()
 {
@@ -1211,27 +1320,14 @@ void PrintStackTrace()
     return;
   }
 
-  void **addresses = (void **) calloc(STACK_MAX, sizeof(void *));
-  if (!addresses) {
-    return;
-  }
-
-  CSSymbolicatorRef symbolicator = {0};
-  bool symbolicatorNeedsRelease = GetSymbolicator(&symbolicator);
-  if (CSIsNull(symbolicator)) {
-    free(addresses);
-    return;
-  }
-
+  callstack_t callstack = {0};
+  void *addresses[STACK_MAX] = {0};
   uint32_t count = backtrace(addresses, STACK_MAX);
   for (uint32_t i = 0; i < count; ++i) {
-    PrintAddress(addresses[i], symbolicator);
+    callstack[i] = (uint64_t) addresses[i];
   }
 
-  if (symbolicatorNeedsRelease) {
-    CSRelease(symbolicator);
-  }
-  free(addresses);
+  PrintCallstack(callstack);
 }
 
 BOOL SwizzleMethods(Class aClass, SEL orgMethod, SEL posedMethod, BOOL classMethods)
