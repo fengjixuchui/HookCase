@@ -1020,6 +1020,7 @@ typedef natural_t thread_flavor_t;
 
 // Kernel private functions needed by code below
 
+typedef vm_map_t (*current_map_t)();
 typedef vm_map_t (*get_task_map_reference_t)(task_t task);
 typedef kern_return_t (*vm_map_copyin_t)(vm_map_t src_map,
                                          vm_map_address_t src_addr,
@@ -1108,6 +1109,7 @@ typedef int (*coalition_get_pid_list_t)(coalition_t coal, uint32_t rolemask,
                                         int sort_order, int *pid_list, int list_sz);
 typedef void (*vm_object_unlock_t)(vm_object_t object);
 
+static current_map_t current_map = NULL;
 static get_task_map_reference_t get_task_map_reference = NULL;
 static vm_map_copyin_t vm_map_copyin = NULL;
 static vm_map_copy_overwrite_t vm_map_copy_overwrite = NULL;
@@ -1182,6 +1184,13 @@ bool find_kernel_private_functions()
     }
   }
 
+  if (!current_map) {
+    current_map = (current_map_t)
+      kernel_dlsym("_current_map");
+    if (!current_map) {
+      return false;
+    }
+  }
   if (!get_task_map_reference) {
     get_task_map_reference = (get_task_map_reference_t)
       kernel_dlsym("_get_task_map_reference");
@@ -4048,12 +4057,19 @@ typedef struct thread_fake_mavericks_debug
   int iotier_override;  // Offset 0x570
 } thread_fake_mavericks_debug_t;
 
-uint64_t g_iotier_override_offset = (uint64_t) -1;
+typedef void (*fp_load_t)(thread_t active_thread);
+extern "C" fp_load_t fp_load = NULL;
 
-void initialize_thread_offsets()
+uint64_t g_iotier_override_offset = -1L;
+
+bool initialize_thread_offsets()
 {
-  if (!find_kernel_private_functions()) {
-    return;
+  if (!fp_load) {
+    fp_load = (fp_load_t)
+      kernel_dlsym("_fp_load");
+    if (!fp_load) {
+      return false;
+    }
   }
 
   if (macOS_Catalina()) {
@@ -4144,6 +4160,11 @@ void initialize_thread_offsets()
         offsetof(struct thread_fake_mavericks_debug, iotier_override);
     }
   }
+  if (g_iotier_override_offset == -1L) {
+    return false;
+  }
+
+  return true;
 }
 
 // From the xnu kernel's osfmk/kern/thread.h
@@ -6905,6 +6926,7 @@ typedef struct _watcher {
   uint64_t unique_pid;
   watcher_info_t info;
   user_addr_t info_addr;
+  uint32_t set;
 } watcher_t;
 
 #define CALL_ORIG_FUNC_SIZE 0x20
@@ -7778,6 +7800,10 @@ bool set_watcher(vm_map_t proc_map, user_addr_t watchpoint,
     if (!watcherp) {
       return false;
     }
+  // Don't do anything if the watchpoint is already set. Without this check we
+  // can end up setting watcherp->orig_prot to a value without VM_PROT_WRITE.
+  } else if (watcherp->set) {
+    return true;
   }
 
   vm_prot_t new_prot = (info.protection & ~VM_PROT_WRITE);
@@ -7804,6 +7830,7 @@ bool set_watcher(vm_map_t proc_map, user_addr_t watchpoint,
   watcherp->orig_prot = info.protection;
   watcherp->unique_pid = unique_pid;
   watcherp->info_addr = info_addr; // May be 0
+  OSIncrementAtomic(&watcherp->set);
   if (have_old_watcher) {
     all_watchers_unlock_write();
   } else {
@@ -7817,6 +7844,11 @@ bool unset_watcher(vm_map_t proc_map, watcher_t *watcherp)
 {
   if (!proc_map || !watcherp) {
     return false;
+  }
+
+  // Don't do anything if the watchpoint is already unset
+  if (!watcherp->set) {
+    return true;
   }
 
   unsigned int page_size = vm_map_page_size(proc_map);
@@ -7841,6 +7873,8 @@ bool unset_watcher(vm_map_t proc_map, watcher_t *watcherp)
   if (rv != KERN_SUCCESS) {
     printf("HookCase(%s[%d]): unset_watcher(): vm_map_protect() failed (\'0x%x\') at \'0x%lx\' with protection \'0x%x\'\n",
            procname, pid, rv, watcherp->range_start, new_prot);
+  } else {
+    OSDecrementAtomic(&watcherp->set);
   }
 
   return (rv == KERN_SUCCESS);
@@ -10376,12 +10410,16 @@ void config_watcher(x86_saved_state_t *intr_state)
           }
 
           if (!bad_watcherp_info_addr) {
-            retval = proc_copyout(proc_map, &watcherp->info,
-                                  watcherp->info_addr, sizeof(watcher_info_t));
-            if (retval) {
-              all_watchers_lock_write();
-              bzero(&watcherp->info, sizeof(watcher_info_t));
-              all_watchers_unlock_write();
+            if (watcherp->info.hit) {
+              retval = proc_copyout(proc_map, &watcherp->info,
+                                    watcherp->info_addr, sizeof(watcher_info_t));
+              if (retval) {
+                all_watchers_lock_write();
+                bzero(&watcherp->info, sizeof(watcher_info_t));
+                all_watchers_unlock_write();
+              }
+            } else {
+              retval = true;
             }
           } else {
             retval = false;
@@ -11131,11 +11169,10 @@ void user_trap_hook(x86_saved_state_t *intr_state, kern_hook_t *hookp)
       watcherp->info.mach_thread = mach_thread;
       watcherp->info.hit = cr2;
 
-      vm_map_t proc_map = task_map_for_proc(proc);
+      vm_map_t proc_map = current_map();
       if (proc_map) {
         get_callstack(proc_map, state, watcherp->info.callstack);
         unset_watcher(proc_map, watcherp);
-        vm_map_deallocate(proc_map);
       }
     }
 
@@ -12042,7 +12079,9 @@ kern_return_t HookCase_start(kmod_info_t * ki, void *d)
     kprintf("HookCase: Unknown kernel type\n");
     return KERN_FAILURE;
   }
-  initialize_thread_offsets();
+  if (!initialize_thread_offsets()) {
+    return KERN_FAILURE;
+  }
   initialize_use_invpcid();
   initialize_cpu_data_offsets();
   if (!install_intr_handlers()) {
